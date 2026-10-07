@@ -1,56 +1,97 @@
-"""Tests for complaint keywords, bigrams, and predefined term counts."""
+"""Tests for complaint keyword analysis functions."""
 
 import pandas as pd
-import pytest
-
-from src.complaint_analysis import (
-    get_top_complaint_keywords,
-    get_top_bigrams,
-    get_predefined_term_counts,
-)
+from src.complaint_analysis import get_top_keywords, get_top_bigrams, get_predefined_term_counts, get_keyword_insights
 
 
-def test_complaint_keywords_and_bigrams():
-    sample_df = pd.DataFrame({
-        "Review Text": [
-            "Poor quality fabric. Very cheap material.",
-            "It was too small and see through.",
-            "Completely see through dress, poor quality.",
+def make_critical_df():
+    return pd.DataFrame({
+        "reviewText": [
+            "The fabric was terrible and see-through. Awful fit.",
+            "Returned it immediately. Poor color faded fast.",
+            "Way too small. Cheap material. Very itchy fabric.",
         ],
+        "overall": [1, 2, 1],
         "clean_text": [
-            "poor quality fabric very cheap material",
-            "it was too small and see through",
-            "completely see through dress poor quality",
-        ]
+            "the fabric was terrible and see through awful fit",
+            "returned it immediately poor color faded fast",
+            "way too small cheap material very itchy fabric",
+        ],
     })
 
-    top_kw = get_top_complaint_keywords(sample_df, n=10)
-    kw_terms = [item.term for item in top_kw]
-    assert "quality" in kw_terms or "poor" in kw_terms or "fabric" in kw_terms
 
-    top_bg = get_top_bigrams(sample_df, n=10)
-    phrases = [item.phrase for item in top_bg]
-    assert "poor quality" in phrases
-    assert "see through" in phrases
+def test_get_top_keywords_returns_list():
+    df = make_critical_df()
+    result = get_top_keywords(df, n=5)
+    assert isinstance(result, list)
+    assert len(result) <= 5
 
 
-def test_predefined_terms_handles_see_through():
-    df = pd.DataFrame({
-        "Review Text": [
-            "Fabric is see-through in the sun.",
-            "The top is totally see through and cheap.",
-            "Returned because of poor color and fit.",
-        ],
-        "clean_text": [
-            "fabric is see through in the sun",
-            "the top is totally see through and cheap",
-            "returned because of poor color and fit",
-        ]
-    })
+def test_get_top_keywords_has_term_count():
+    df = make_critical_df()
+    result = get_top_keywords(df)
+    assert "term" in result[0]
+    assert "count" in result[0]
 
-    term_counts = {item.term: item.count for item in get_predefined_term_counts(df)}
-    assert term_counts["see-through"] == 2
-    assert term_counts["cheap"] == 1
-    assert term_counts["returned"] == 1
-    assert term_counts["fit"] == 1
-    assert term_counts["color"] == 1
+
+def test_get_top_keywords_fabric_appears():
+    """'fabric' appears twice so it should be in the top keywords."""
+    df = make_critical_df()
+    result = get_top_keywords(df, n=15)
+    terms = [r["term"] for r in result]
+    assert "fabric" in terms
+
+
+def test_get_top_bigrams_returns_list():
+    df = make_critical_df()
+    result = get_top_bigrams(df, n=5)
+    assert isinstance(result, list)
+
+
+def test_get_top_bigrams_has_phrase_count():
+    df = make_critical_df()
+    result = get_top_bigrams(df)
+    if result:
+        assert "phrase" in result[0]
+        assert "count" in result[0]
+
+
+def test_get_predefined_term_counts_all_terms_present():
+    from src.config import COMPLAINT_TERMS
+    df = make_critical_df()
+    result = get_predefined_term_counts(df)
+    result_terms = [r["term"] for r in result]
+    for term in COMPLAINT_TERMS:
+        assert term in result_terms
+
+
+def test_get_predefined_term_counts_fabric():
+    df = make_critical_df()
+    result = get_predefined_term_counts(df)
+    fabric_entry = next((r for r in result if r["term"] == "fabric"), None)
+    assert fabric_entry is not None
+    assert fabric_entry["count"] == 2
+
+
+def test_get_predefined_term_counts_see_through():
+    df = make_critical_df()
+    result = get_predefined_term_counts(df)
+    see_through = next((r for r in result if r["term"] == "see-through"), None)
+    assert see_through is not None
+    assert see_through["count"] >= 1
+
+
+def test_get_predefined_term_counts_sorted():
+    """Results should be sorted descending by count."""
+    df = make_critical_df()
+    result = get_predefined_term_counts(df)
+    counts = [r["count"] for r in result]
+    assert counts == sorted(counts, reverse=True)
+
+
+def test_get_keyword_insights_structure():
+    df = make_critical_df()
+    result = get_keyword_insights(df)
+    assert "top_keywords" in result
+    assert "predefined_terms" in result
+    assert "top_bigrams" in result

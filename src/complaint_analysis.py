@@ -1,96 +1,72 @@
-"""Complaint keyword, bigram, and specific term frequency analysis module."""
+"""Complaint keyword analysis — find the most common complaint words and phrases."""
 
 import re
 from collections import Counter
-from typing import List, Optional, Set
+from typing import List, Optional
 import pandas as pd
 
-from src.config import MIN_WORD_LEN, CUSTOM_STOPWORDS, PREDEFINED_COMPLAINT_TERMS
-from src.schemas import ComplaintTermFrequency, BigramFrequency, KeywordInsights
+from src.config import MIN_WORD_LEN, CUSTOM_STOPWORDS, COMPLAINT_TERMS
 
 
-def get_top_complaint_keywords(
-    df: pd.DataFrame,
-    n: int = 15,
-    min_len: int = MIN_WORD_LEN,
-    stopwords: Optional[Set[str]] = None,
-) -> List[ComplaintTermFrequency]:
-    """Calculate the most frequent complaint words using collections.Counter.
-
-    Filters tokens by minimum length and stopwords.
+def get_top_keywords(df: pd.DataFrame, n: int = 15) -> List[dict]:
+    """Find the most frequent meaningful words in critical review text.
+    
+    Skips short words and common stopwords so the results are actually useful.
+    Returns a list of dicts: [{"term": word, "count": frequency}, ...]
     """
-    if stopwords is None:
-        stopwords = CUSTOM_STOPWORDS
-
-    counter: Counter = Counter()
-
+    counter = Counter()
     for text in df["clean_text"].dropna():
         tokens = text.split()
-        valid_tokens = [
-            t for t in tokens
-            if len(t) >= min_len and t not in stopwords
-        ]
-        counter.update(valid_tokens)
-
-    return [
-        ComplaintTermFrequency(term=word, count=int(count))
-        for word, count in counter.most_common(n)
-    ]
+        valid = [t for t in tokens if len(t) >= MIN_WORD_LEN and t not in CUSTOM_STOPWORDS]
+        counter.update(valid)
+    return [{"term": word, "count": int(count)} for word, count in counter.most_common(n)]
 
 
-def get_top_bigrams(df: pd.DataFrame, n: int = 10) -> List[BigramFrequency]:
-    """Calculate the top adjacent word pairs in the cleaned reviews."""
-    bigram_counter: Counter = Counter()
-
+def get_top_bigrams(df: pd.DataFrame, n: int = 10) -> List[dict]:
+    """Find the most common 2-word phrases in critical reviews.
+    
+    Bigrams help identify complaint patterns like 'wrong size' or 'bad quality'.
+    Returns a list of dicts: [{"phrase": bigram, "count": frequency}, ...]
+    """
+    counter = Counter()
     for text in df["clean_text"].dropna():
         tokens = text.split()
         if len(tokens) >= 2:
             bigrams = [f"{tokens[i]} {tokens[i+1]}" for i in range(len(tokens) - 1)]
-            bigram_counter.update(bigrams)
-
-    return [
-        BigramFrequency(phrase=phrase, count=int(count))
-        for phrase, count in bigram_counter.most_common(n)
-    ]
+            counter.update(bigrams)
+    return [{"phrase": phrase, "count": int(count)} for phrase, count in counter.most_common(n)]
 
 
-def get_predefined_term_counts(
-    df: pd.DataFrame,
-    terms: Optional[List[str]] = None,
-) -> List[ComplaintTermFrequency]:
-    """Count occurrences of specific predefined complaint keywords in review text.
-
-    Supports both 'see-through' and 'see through' for robust detection.
+def get_predefined_term_counts(df: pd.DataFrame) -> List[dict]:
+    """Count how many critical reviews mention each of the predefined complaint words.
+    
+    These are specific terms we're tracking: fit, fabric, color, size, etc.
+    Returns a sorted list (highest count first): [{"term": ..., "count": ...}, ...]
     """
-    if terms is None:
-        terms = PREDEFINED_COMPLAINT_TERMS
-
-    counts: List[ComplaintTermFrequency] = []
-
-    for term in terms:
+    results = []
+    for term in COMPLAINT_TERMS:
         if term == "see-through":
-            # Check for hyphenated or space-separated variations
             pattern = r"\bsee[\s\-]through\b"
-            matches = df["Review Text"].astype(str).str.contains(pattern, case=False, regex=True).sum()
+            count = int(df["reviewText"].astype(str).str.contains(pattern, case=False, regex=True).sum())
         else:
             pattern = rf"\b{re.escape(term)}\b"
-            matches = df["clean_text"].astype(str).str.contains(pattern, case=False, regex=True).sum()
+            count = int(df["clean_text"].astype(str).str.contains(pattern, case=False, regex=True).sum())
+        results.append({"term": term, "count": count})
 
-        counts.append(ComplaintTermFrequency(term=term, count=int(matches)))
-
-    # Sort descending by frequency
-    counts.sort(key=lambda x: x.count, reverse=True)
-    return counts
+    results.sort(key=lambda x: x["count"], reverse=True)
+    return results
 
 
-def get_keyword_insights(df: pd.DataFrame) -> KeywordInsights:
-    """Generate comprehensive complaint keyword, bigram, and predefined term insights."""
-    top_kw = get_top_complaint_keywords(df, n=15)
-    predefined = get_predefined_term_counts(df)
-    top_bg = get_top_bigrams(df, n=10)
-
-    return KeywordInsights(
-        top_keywords=top_kw,
-        predefined_terms=predefined,
-        top_bigrams=top_bg,
-    )
+def get_keyword_insights(df: pd.DataFrame) -> dict:
+    """Run all keyword analyses and return the combined results.
+    
+    Returns a dict with:
+    - top_keywords: most frequent words in critical reviews
+    - predefined_terms: counts for our tracked complaint words
+    - top_bigrams: most common 2-word phrases
+    """
+    return {
+        "top_keywords": get_top_keywords(df, n=15),
+        "predefined_terms": get_predefined_term_counts(df),
+        "top_bigrams": get_top_bigrams(df, n=10),
+    }

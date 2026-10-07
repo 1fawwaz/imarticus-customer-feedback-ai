@@ -1,50 +1,79 @@
-"""Tests for top 3 critical review selection logic."""
+"""Tests for top 3 review selection logic."""
 
 import pandas as pd
 import pytest
+from src.review_selection import select_top_3_reviews
 
-from src.review_selection import select_top_critical_reviews
 
-
-def test_select_top_critical_reviews_ranking():
-    # Construct DataFrame with varied ratings and review lengths
-    df = pd.DataFrame({
-        "Rating": [5, 1, 1, 2, 1, 1],
-        "Title": ["Great", "Short complaint", "Longest complaint text", "Two stars", "Medium complaint text", "Very short"],
-        "Review Text": [
-            "This was wonderful and flattering in every way imaginable.",     # 5 stars - ignored
-            "Terrible shirt.",                                                # 15 chars
-            "This dress had terrible seams, awful fabric, completely itchy and see through.", # 78 chars
-            "Did not fit well.",                                              # 2 stars - ignored
-            "Awful material, buttons fell off immediately upon opening.",      # 58 chars
-            "Bad.",                                                           # 4 chars
+def make_df():
+    return pd.DataFrame({
+        "reviewText": [
+            "Short review.",
+            "A much longer review with more specific complaints about the fabric and fit of this dress.",
+            "Another medium length review about the poor quality of the item received.",
+            "The longest review here — absolutely terrible experience, the dress was see-through, fabric was cheap, fit was off, and color looked nothing like the picture. Will never order again.",
+            "Average review.",
         ],
-        "clean_text": ["clean1", "clean2", "clean3", "clean4", "clean5", "clean6"],
-        "Clothing ID": [1, 2, 3, 4, 5, 6],
+        "overall": [1, 1, 1, 1, 3],
+        "summary": ["Bad", "Detailed", "Medium", "Worst ever", "Okay"],
+        "asin": ["A1", "A2", "A3", "A4", "A5"],
+        "helpful": [0, 5, 2, 10, 1],
+        "clean_text": [
+            "short review",
+            "much longer review specific complaints fabric fit dress",
+            "medium length review poor quality item received",
+            "longest review absolutely terrible experience dress see through fabric cheap fit off color nothing picture",
+            "average review",
+        ],
     })
 
-    top_3 = select_top_critical_reviews(df, n=3)
 
-    assert top_3.count == 3
-    # All must have Rating == 1
-    assert all(r.rating == 1 for r in top_3.reviews)
-
-    # Must be ordered strictly descending by length: 78 -> 58 -> 15
-    lengths = [r.review_length for r in top_3.reviews]
-    assert lengths == [78, 58, 15]
-    assert top_3.reviews[0].title == "Longest complaint text"
-    assert top_3.reviews[1].title == "Medium complaint text"
-    assert top_3.reviews[2].title == "Short complaint"
+def test_select_top_3_returns_3():
+    df = make_df()
+    result = select_top_3_reviews(df)
+    assert len(result) == 3
 
 
-def test_select_top_critical_reviews_insufficient_records():
+def test_select_top_3_all_lowest_rating():
+    df = make_df()
+    result = select_top_3_reviews(df)
+    min_rating = df["overall"].min()
+    for review in result:
+        assert review["overall"] == min_rating
+
+
+def test_select_top_3_sorted_by_length():
+    """The longest review should be first."""
+    df = make_df()
+    result = select_top_3_reviews(df)
+    lengths = [r["review_length"] for r in result]
+    assert lengths == sorted(lengths, reverse=True)
+
+
+def test_select_top_3_has_required_keys():
+    df = make_df()
+    result = select_top_3_reviews(df)
+    required_keys = {"index", "asin", "overall", "summary", "reviewText", "helpful", "review_length", "detected_complaints"}
+    for review in result:
+        assert required_keys.issubset(review.keys())
+
+
+def test_select_top_3_detected_complaints():
+    """The longest review should detect some complaint keywords."""
+    df = make_df()
+    result = select_top_3_reviews(df)
+    # The longest review has 'fabric', 'fit', 'see-through', 'color'
+    assert len(result[0]["detected_complaints"]) > 0
+
+
+def test_select_top_3_raises_if_not_enough():
     df = pd.DataFrame({
-        "Rating": [1, 2, 3],
-        "Title": ["T1", "T2", "T3"],
-        "Review Text": ["R1", "R2", "R3"],
-        "clean_text": ["c1", "c2", "c3"],
+        "reviewText": ["Short", "Also short"],
+        "overall": [1, 1],
+        "summary": ["A", "B"],
+        "asin": ["X", "Y"],
+        "helpful": [0, 0],
+        "clean_text": ["short", "also short"],
     })
-    # Only one 1-star review; requesting 3 should raise ValueError
-    with pytest.raises(ValueError) as exc:
-        select_top_critical_reviews(df, n=3)
-    assert "fewer than the requested 3 reviews" in str(exc.value)
+    with pytest.raises(ValueError):
+        select_top_3_reviews(df)

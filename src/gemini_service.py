@@ -1,4 +1,4 @@
-"""Gemini GenAI integration service for generating personalized apology emails."""
+"""Generate AI apology email drafts using Google Gemini."""
 
 import os
 import re
@@ -7,21 +7,19 @@ from typing import Optional, Tuple
 from dotenv import load_dotenv
 
 from src.config import GEMINI_API_KEY, GEMINI_MODEL, SYSTEM_PROMPT
-from src.schemas import AIResponseDraft
-from src.validators import validate_apology_response
+from src.validators import validate_response
 
 load_dotenv()
 
 
-def extract_subject_and_body(text: str) -> Tuple[str, str]:
-    """Parse subject line if provided by the model or construct an appropriate default."""
+def _parse_subject_and_body(text: str) -> Tuple[str, str]:
+    """Extract the subject line if the model included one, otherwise use a default."""
     subject = "Regarding your recent experience with our apparel"
     body = text.strip()
 
-    subject_match = re.search(r"^(?:Subject|Re):\s*(.+)$", body, re.MULTILINE | re.IGNORECASE)
-    if subject_match:
-        subject = subject_match.group(1).strip()
-        # Remove the Subject line from the body
+    match = re.search(r"^(?:Subject|Re):\s*(.+)$", body, re.MULTILINE | re.IGNORECASE)
+    if match:
+        subject = match.group(1).strip()
         body = re.sub(r"^(?:Subject|Re):\s*.+\n+", "", body, flags=re.MULTILINE | re.IGNORECASE).strip()
 
     return subject, body
@@ -30,77 +28,68 @@ def extract_subject_and_body(text: str) -> Tuple[str, str]:
 def generate_apology_email(
     review_text: str,
     rating: int,
-    title: Optional[str] = "",
-    clothing_id: Optional[int] = None,
-    department: Optional[str] = None,
-) -> AIResponseDraft:
-    """Generate an empathetic, complaint-specific apology email draft using Google Gemini.
+    summary: Optional[str] = "",
+    asin: Optional[str] = None,
+) -> dict:
+    """Use Google Gemini to draft a personalized apology email for a critical review.
 
-    Ensures compliance with:
-      - Max 130 words
-      - Reference to specific customer complaints
-      - Offer of concrete next step (refund / exchange / return)
-      - Sign-off: 'Customer Care Team'
-      - Zero fabricated actions (never claims return/refund was already completed)
-      - No fabricated order numbers or policies
+    The email must:
+    - Be under 130 words
+    - Reference the customer's specific complaint
+    - Offer a next step (refund, return, or exchange)
+    - Sign off as 'Customer Care Team'
+    - NOT claim any action has already been completed
+
+    Returns a dict with keys: subject, email_body, model_used, is_fallback, error, validation.
     """
-    # Allow environment override or fallback to config
-    if "GEMINI_API_KEY" in os.environ:
-        api_key = os.environ.get("GEMINI_API_KEY")
-    else:
-        api_key = GEMINI_API_KEY
-
+    api_key = os.environ.get("GEMINI_API_KEY") or GEMINI_API_KEY
     model_name = os.getenv("GEMINI_MODEL", GEMINI_MODEL)
 
-    # Check for missing API credentials
+    # Fallback if no API key
     if not api_key or api_key == "your_key_here":
-        err_msg = "Gemini API key is not configured in .env. Real AI generation unavailable."
         fallback_body = (
             "Dear Valued Customer,\n\n"
-            "Thank you for sharing your candid feedback. We sincerely apologize that your purchase "
-            "did not meet your expectations. We would be happy to help arrange a return or refund for you. "
+            "Thank you for sharing your feedback. We sincerely apologize that your purchase "
+            "did not meet your expectations. We would be happy to help arrange a return or refund. "
             "Please reply to this email and our team will assist you with the next steps.\n\n"
             "Warm regards,\nCustomer Care Team"
         )
-        val = validate_apology_response(fallback_body, review_text, rating)
-        return AIResponseDraft(
-            subject="Regarding your recent order",
-            email_body=fallback_body,
-            model_used="None (Fallback)",
-            is_fallback=True,
-            error_message=err_msg,
-            validation=val,
-        )
+        return {
+            "subject": "Regarding your recent order",
+            "email_body": fallback_body,
+            "model_used": "None (API key not set)",
+            "is_fallback": True,
+            "error": "GEMINI_API_KEY is not configured.",
+            "validation": validate_response(fallback_body, review_text, rating),
+        }
 
-    # Attempt GenAI call with automatic retries for transient spikes
+    # Build the prompt
+    content_parts = [f"Customer Rating: {rating}/5 Stars"]
+    if summary:
+        content_parts.append(f"Review Summary: {summary}")
+    if asin:
+        content_parts.append(f"Product ID: {asin}")
+    content_parts.append(f"\nCustomer Review:\n\"{review_text}\"")
+    user_content = "\n".join(content_parts)
+
+    # Try the configured model, fall back to other Gemini variants if needed
+    models_to_try = [model_name, "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+    # Remove duplicates while preserving order
+    seen = set()
+    models_to_try = [m for m in models_to_try if not (m in seen or seen.add(m))]
+
+    raw_text = None
+    last_error = None
+    used_model = model_name
+
     try:
         from google import genai
         from google.genai import types
 
         client = genai.Client(api_key=api_key)
 
-        title_info = f"Review Title: {title}" if title else "Review Title: (None provided)"
-        item_info = f"Department: {department}" if department else ""
-
-        user_content = (
-            f"Customer Rating: {rating}/5 Stars\n"
-            f"{title_info}\n"
-            f"{item_info}\n\n"
-            f"Customer Review Text:\n\"{review_text}\""
-        )
-
-        # Retry logic for 503 / high demand or 429
-        max_retries = 3
-        last_error = None
-        raw_text = None
-
-        # Candidate models to try in sequence if specified model has 404 restriction
-        models_to_try = [model_name]
-        if model_name != "gemini-3.1-flash-lite" and model_name != "gemini-3.8-flash":
-            models_to_try.extend(["gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-2.5-flash"])
-
         for current_model in models_to_try:
-            for attempt in range(max_retries):
+            for attempt in range(3):
                 try:
                     response = client.models.generate_content(
                         model=current_model,
@@ -111,53 +100,46 @@ def generate_apology_email(
                         ),
                     )
                     raw_text = response.text.strip()
-                    model_name = current_model
+                    used_model = current_model
                     break
                 except Exception as exc:
                     err_str = str(exc)
                     last_error = exc
-                    # If 404 (model not found / restricted), break inner loop to try fallback candidate
                     if "404" in err_str or "NOT_FOUND" in err_str:
-                        break
-                    # If 503 (high demand) or 429, wait and retry
-                    if attempt < max_retries - 1 and ("503" in err_str or "429" in err_str or "UNAVAILABLE" in err_str):
+                        break  # This model not available, try next
+                    if attempt < 2 and ("503" in err_str or "429" in err_str):
                         time.sleep(2 * (attempt + 1))
                         continue
                     break
-
             if raw_text is not None:
                 break
 
         if raw_text is None:
-            raise last_error or RuntimeError("Failed to generate response from Gemini.")
+            raise last_error or RuntimeError("No response received from Gemini.")
 
-        subject, body = extract_subject_and_body(raw_text)
-        val = validate_apology_response(body, review_text, rating)
-
-        return AIResponseDraft(
-            subject=subject,
-            email_body=body,
-            model_used=model_name,
-            is_fallback=False,
-            error_message=None,
-            validation=val,
-        )
+        subject, body = _parse_subject_and_body(raw_text)
+        return {
+            "subject": subject,
+            "email_body": body,
+            "model_used": used_model,
+            "is_fallback": False,
+            "error": None,
+            "validation": validate_response(body, review_text, rating),
+        }
 
     except Exception as exc:
-        err_msg = f"Gemini API generation failed ({type(exc).__name__}): {exc}"
         fallback_body = (
             "Dear Valued Customer,\n\n"
-            "Thank you for reaching out and sharing your feedback. We are truly sorry that your "
-            "purchase did not meet our usual quality standards. We would be glad to help arrange "
-            "a return, exchange, or refund for you. Please reply to this email so we can take care of this for you.\n\n"
+            "Thank you for reaching out. We are truly sorry that your purchase did not meet "
+            "our usual quality standards. We would be glad to help arrange a return, exchange, "
+            "or refund. Please reply so we can take care of this for you.\n\n"
             "Warm regards,\nCustomer Care Team"
         )
-        val = validate_apology_response(fallback_body, review_text, rating)
-        return AIResponseDraft(
-            subject="Regarding your recent order",
-            email_body=fallback_body,
-            model_used=f"{model_name} (Failed)",
-            is_fallback=True,
-            error_message=err_msg,
-            validation=val,
-        )
+        return {
+            "subject": "Regarding your recent order",
+            "email_body": fallback_body,
+            "model_used": f"{used_model} (failed)",
+            "is_fallback": True,
+            "error": f"{type(exc).__name__}: {exc}",
+            "validation": validate_response(fallback_body, review_text, rating),
+        }

@@ -1,60 +1,107 @@
-"""Tests for data cleaning logic."""
+"""Tests for data cleaning functions."""
 
 import pandas as pd
-import numpy as np
 import pytest
-
-from src.cleaning import clean_review_text, clean_dataset
-
-
-def test_clean_review_text():
-    raw_sample = "This dress was TOO SMALL!! And poor quality... 123 stars!!"
-    cleaned = clean_review_text(raw_sample)
-    assert "too small" in cleaned
-    assert "poor quality" in cleaned
-    assert "123" not in cleaned
-    assert "!" not in cleaned
-    assert cleaned == "this dress was too small and poor quality stars"
+from src.cleaning import clean_text, normalize_columns, validate_columns, clean_dataset
+from src.config import REQUIRED_COLUMNS
 
 
-def test_clean_dataset_handles_missing_and_duplicates():
-    raw_data = {
-        "Unnamed: 0": [0, 1, 2, 3, 4, 5],
-        "Clothing ID": [101, 102, 103, 104, 105, 105],
-        "Age": [30, 40, 25, 50, 35, 35],
-        "Title": [None, "Great fit", "Bad fabric", "", "Duplicate", "Duplicate"],
-        "Review Text": [
-            "Nice color but too tight.",
-            np.nan,                      # Missing review text
-            "   ",                       # Whitespace review text
-            "Terrible stitching.",
-            "Loved it completely.",
-            "Loved it completely."       # Exact duplicate
+def make_sample_df():
+    """Create a small sample DataFrame with the required 5 columns."""
+    return pd.DataFrame({
+        "reviewText": [
+            "The fabric is amazing and fits perfectly!",
+            "Very poor quality, it was see-through and too small.",
+            "   ",  # whitespace-only, should be dropped
+            "The color faded after one wash.",
         ],
-        "Rating": [2, 5, 1, "invalid", 4, 4],  # Invalid rating included
-        "Recommended IND": [0, 1, 0, 0, 1, 1],
-        "Positive Feedback Count": [0, 2, 1, 0, 3, 3],
-        "Division Name": ["General", "General", "General", "General", "General", "General"],
-        "Department Name": ["Dresses", "Dresses", "Tops", "Tops", "Dresses", "Dresses"],
-        "Class Name": ["Dresses", "Dresses", "Blouses", "Blouses", "Dresses", "Dresses"],
-    }
-    df_raw = pd.DataFrame(raw_data)
-    df_clean, metrics = clean_dataset(df_raw)
+        "overall": [5, 1, 3, 2],
+        "summary": ["Great dress", "Terrible quality", "Okay", "Disappointing"],
+        "asin": ["A1", "A2", "A3", "A1"],
+        "helpful": [10, 5, 0, 3],
+    })
 
-    # Verifications
-    assert "Unnamed: 0" not in df_clean.columns
-    assert "clean_text" in df_clean.columns
-    assert "review_length" in df_clean.columns
 
-    # Rows with missing text, whitespace text, or invalid rating must be dropped
-    assert len(df_clean) == 2  # Only row 0 (rating 2) and row 4 (rating 4) remain after deduplication
-    assert metrics.rows_before == 6
-    assert metrics.rows_after == 2
-    assert metrics.rows_removed == 4
-    assert metrics.duplicates_removed == 1
+def test_clean_text_basic():
+    assert clean_text("Hello, World! 123") == "hello world"
 
-    # Missing Title should be imputed with empty string
-    assert df_clean.iloc[0]["Title"] == ""
 
-    # Ratings must be integers between 1 and 5
-    assert all(df_clean["Rating"].isin([1, 2, 3, 4, 5]))
+def test_clean_text_none():
+    assert clean_text(None) == ""
+
+
+def test_clean_text_extra_spaces():
+    result = clean_text("  too   many   spaces  ")
+    assert "  " not in result
+
+
+def test_normalize_columns_kaggle_format():
+    """Test that Kaggle-format column names are renamed correctly."""
+    kaggle_df = pd.DataFrame({
+        "Review Text": ["Nice dress"],
+        "Rating": [5],
+        "Title": ["Love it"],
+        "Clothing ID": ["C1"],
+        "Positive Feedback Count": [2],
+    })
+    result = normalize_columns(kaggle_df)
+    assert "reviewText" in result.columns
+    assert "overall" in result.columns
+    assert "summary" in result.columns
+    assert "asin" in result.columns
+    assert "helpful" in result.columns
+
+
+def test_normalize_columns_already_correct():
+    """Test that already-correct columns are untouched."""
+    df = make_sample_df()
+    result = normalize_columns(df)
+    assert list(df.columns) == list(result.columns)
+
+
+def test_validate_columns_pass():
+    df = make_sample_df()
+    ok, missing = validate_columns(df)
+    assert ok is True
+    assert missing == []
+
+
+def test_validate_columns_fail():
+    df = pd.DataFrame({"reviewText": ["text"], "overall": [5]})
+    ok, missing = validate_columns(df)
+    assert ok is False
+    assert "summary" in missing
+    assert "asin" in missing
+    assert "helpful" in missing
+
+
+def test_clean_dataset_removes_missing_text():
+    df = make_sample_df()
+    cleaned, summary = clean_dataset(df)
+    # The whitespace-only row should be dropped
+    assert len(cleaned) < len(df)
+    assert summary["rows_removed"] > 0
+
+
+def test_clean_dataset_overall_is_int():
+    df = make_sample_df()
+    cleaned, _ = clean_dataset(df)
+    assert cleaned["overall"].dtype in [int, "int64", "int32"]
+
+
+def test_clean_dataset_ratings_valid_range():
+    df = make_sample_df()
+    cleaned, _ = clean_dataset(df)
+    assert cleaned["overall"].between(1, 5).all()
+
+
+def test_clean_dataset_has_clean_text():
+    df = make_sample_df()
+    cleaned, _ = clean_dataset(df)
+    assert "clean_text" in cleaned.columns
+
+
+def test_clean_dataset_invalid_schema():
+    bad_df = pd.DataFrame({"text": ["hi"], "score": [5]})
+    with pytest.raises(ValueError, match="Dataset is missing required columns"):
+        clean_dataset(bad_df)

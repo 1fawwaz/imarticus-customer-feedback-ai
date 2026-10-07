@@ -1,4 +1,4 @@
-"""Configuration settings for Customer Feedback Intelligence system."""
+"""Configuration settings for the Customer Feedback project."""
 
 import os
 from pathlib import Path
@@ -6,32 +6,28 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Project Paths
+# Paths
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_PATH = BASE_DIR / "data" / "Womens Clothing E-Commerce Reviews.csv"
 OUTPUTS_DIR = BASE_DIR / "outputs"
 
-# Gemini Model Settings
+# Gemini settings
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
-# Text Processing Constants
+# Required columns for this dataset
+REQUIRED_COLUMNS = ["reviewText", "overall", "summary", "asin", "helpful"]
+
+# Minimum word length for keyword analysis
 MIN_WORD_LEN = 3
 
-PREDEFINED_COMPLAINT_TERMS = [
-    "small",
-    "large",
-    "cheap",
-    "poor",
-    "returned",
-    "refund",
-    "itchy",
-    "see-through",
-    "fit",
-    "color",
-    "fabric",
+# Complaint keywords to track
+COMPLAINT_TERMS = [
+    "small", "large", "cheap", "poor", "returned",
+    "refund", "itchy", "see-through", "fit", "color", "fabric",
 ]
 
+# Stopwords to skip in keyword frequency analysis
 CUSTOM_STOPWORDS = {
     "the", "and", "to", "of", "a", "i", "in", "it", "is", "this", "that",
     "was", "for", "with", "my", "on", "but", "have", "not", "so", "dress",
@@ -42,7 +38,7 @@ CUSTOM_STOPWORDS = {
     "get", "got", "really", "even", "which", "there", "were", "been", "am"
 }
 
-# System Prompt with strict anti-fabrication guidelines
+# Gemini system prompt
 SYSTEM_PROMPT = (
     "You are a Customer Support Agent for a retail clothing company. "
     "Write a short (under 130 words), warm, personalized, empathetic apology email. "
