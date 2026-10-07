@@ -3,6 +3,9 @@ Streamlit Production Application
 
 An AI-powered customer complaint analysis and response assistant built for
 the Imarticus Data Science Internship Assessment.
+
+Supports the official Women's Clothing Reviews dataset AND any compatible
+customer-review CSV via smart schema detection.
 """
 
 import sys
@@ -41,6 +44,7 @@ from src.complaint_analysis import (
 from src.review_selection import select_top_critical_reviews
 from src.gemini_service import generate_apology_email
 from src.validators import validate_apology_response
+from src.schema_detection import detect_schema, apply_mapping, get_critical_threshold
 
 # -----------------------------------------------------------------------------
 # Streamlit App Configuration
@@ -52,7 +56,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Custom CSS for modern styling and KPI presentation
+# Custom CSS
 st.markdown("""
 <style>
     .metric-card {
@@ -101,42 +105,177 @@ st.markdown("""
         font-style: italic;
         color: #1e293b;
     }
+    .compat-check { font-family: monospace; }
 </style>
 """, unsafe_allow_html=True)
 
 
 # -----------------------------------------------------------------------------
+# Schema Detection & Mapping UI helper
+# -----------------------------------------------------------------------------
+
+def run_schema_detection_ui(df_raw: pd.DataFrame) -> tuple[pd.DataFrame | None, dict | None, str | None]:
+    """Detect schema, show compatibility card, optional mapping UI.
+
+    Returns:
+        (mapped_df, detection_info_dict, error_message)
+        error_message is None on success.
+    """
+    detection = detect_schema(df_raw)
+
+    # --- Unsupported dataset ---
+    if not detection.compatible:
+        col_list = "\n".join(f"• {c}" for c in detection.detected_columns[:20])
+        st.error(f"""
+❌ **Unsupported Dataset**
+
+This application analyzes customer-review datasets.
+
+**Required fields not found:**
+• Review Text
+• Rating
+
+**Detected columns in your file:**
+```
+{col_list}
+```
+
+Please upload a compatible customer-review CSV containing at least a **Review Text** and **Rating** column.
+        """)
+        return None, None, "Unsupported dataset."
+
+    # --- Official dataset badge ---
+    if detection.is_official_dataset:
+        st.success("🟢 **Imarticus Assessment Dataset Detected** — Official Women's Clothing E-Commerce Reviews")
+    else:
+        st.info("🔵 **Compatible Customer Review Dataset** — Columns mapped automatically")
+
+    # --- Rating scale check ---
+    threshold, is_default = get_critical_threshold(detection)
+
+    # --- Manual mapping if ambiguous ---
+    if detection.needs_user_mapping:
+        st.warning(f"⚠️ Automatic detection was ambiguous for: **{', '.join(detection.ambiguous_fields)}**. Please confirm below.")
+        col_options = ["(None)"] + list(df_raw.columns)
+
+        st.markdown("#### 🗺️ Map Your Dataset Columns")
+        with st.form("column_mapping_form"):
+            rt_choice = st.selectbox(
+                "Review Text column *",
+                options=[c for c in df_raw.columns],
+                index=0,
+                key="map_review_text"
+            )
+            rat_choice = st.selectbox(
+                "Rating column *",
+                options=[c for c in df_raw.columns],
+                index=min(1, len(df_raw.columns) - 1),
+                key="map_rating"
+            )
+            submitted = st.form_submit_button("✅ Confirm Dataset")
+
+        if submitted:
+            if rt_choice and rat_choice and rt_choice != rat_choice:
+                rename_map = {rt_choice: "Review Text", rat_choice: "Rating"}
+                df_mapped = df_raw.rename(columns=rename_map)
+                st.success(f"Mapped → `Review Text`: `{rt_choice}` | `Rating`: `{rat_choice}`")
+            else:
+                st.error("Please select distinct columns for Review Text and Rating.")
+                return None, None, "Mapping incomplete."
+        else:
+            return None, None, "Awaiting column mapping confirmation."
+
+    else:
+        # Automatic mapping (confident)
+        df_mapped = apply_mapping(df_raw, detection)
+
+    # --- Compatibility summary card ---
+    with st.expander("📋 Dataset Compatibility Report", expanded=not detection.is_official_dataset):
+        req_col, opt_col = st.columns(2)
+        with req_col:
+            st.markdown("**Required Fields**")
+            st.markdown(f"✅ `Review Text` → `{detection.mapping.review_text_col}`")
+            st.markdown(f"✅ `Rating` → `{detection.mapping.rating_col}`")
+        with opt_col:
+            st.markdown("**Optional Fields**")
+            for canon, actual in detection.optional_found.items():
+                st.markdown(f"✅ `{canon}` → `{actual}`")
+            for missing in detection.optional_missing:
+                st.markdown(f"❌ `{missing}` — not available")
+
+        r_min = detection.rating_min
+        r_max = detection.rating_max
+        scale_label = f"{int(r_min)}–{int(r_max)}" if r_min is not None else "unknown"
+        st.markdown(f"**Rating Scale Detected:** `{scale_label}`")
+
+        if not detection.rating_is_numeric:
+            st.error("⚠️ Rating column is not numeric. Please convert to numbers before uploading.")
+            return None, None, "Non-numeric rating column."
+
+    # --- Non-standard scale confirmation ---
+    if not is_default:
+        r_min = detection.rating_min or 1
+        r_max = detection.rating_max or 10
+        st.warning(f"⚠️ Rating scale `{int(r_min)}–{int(r_max)}` differs from the standard 1–5. Please confirm the critical-review threshold.")
+        custom_threshold = st.slider(
+            "Critical Rating Threshold (reviews at or below this are flagged as critical)",
+            min_value=int(r_min),
+            max_value=int(r_max),
+            value=int(round((r_max - r_min) * 0.3 + r_min)),   # default ~30th percentile
+            step=1,
+            key="custom_threshold_slider"
+        )
+        if st.button("Confirm Threshold & Continue", key="confirm_threshold"):
+            st.session_state["critical_threshold"] = custom_threshold
+        elif "critical_threshold" not in st.session_state:
+            st.info("Please confirm the critical threshold to continue analysis.")
+            return None, None, "Awaiting threshold confirmation."
+
+    info = {
+        "detection": detection,
+        "threshold": st.session_state.get("critical_threshold", int(threshold)),
+        "is_official": detection.is_official_dataset,
+        "optional_found": detection.optional_found,
+    }
+    return df_mapped, info, None
+
+
+# -----------------------------------------------------------------------------
 # Caching Data Pipelines
 # -----------------------------------------------------------------------------
+
 @st.cache_data(show_spinner=False)
-def load_and_process_data(file_source):
-    """Load and execute deterministic cleaning on the dataset."""
-    if isinstance(file_source, Path):
-        if not file_source.exists():
-            return None, None, None, f"Dataset not found at {file_source}"
-        df_raw = pd.read_csv(file_source)
-    else:
-        df_raw = pd.read_csv(file_source)
-
-    # Validate required columns
-    required_cols = {"Review Text", "Rating"}
-    missing = required_cols - set(df_raw.columns)
-    if missing:
-        return None, None, None, f"Missing required columns in dataset: {', '.join(missing)}"
-
-    df_cleaned, metrics = clean_dataset(df_raw)
-    overview = get_dataset_overview(df_raw, df_cleaned)
-    return df_raw, df_cleaned, overview, None
+def load_raw_csv(file_source) -> tuple[pd.DataFrame | None, str | None]:
+    """Read the raw CSV from a path or uploaded file object."""
+    try:
+        if isinstance(file_source, Path):
+            if not file_source.exists():
+                return None, f"Dataset file not found at `{file_source}`."
+            return pd.read_csv(file_source), None
+        else:
+            return pd.read_csv(file_source), None
+    except Exception as exc:
+        return None, f"Failed to read CSV: {exc}"
 
 
 @st.cache_data(show_spinner=False)
-def compute_insights(df_critical):
+def process_mapped_data(df_mapped_json: str) -> tuple:
+    """Run cleaning pipeline on a JSON-serialised mapped DataFrame."""
+    df_mapped = pd.read_json(df_mapped_json, orient="split")
+    df_cleaned, metrics = clean_dataset(df_mapped)
+    overview = get_dataset_overview(df_mapped, df_cleaned)
+    return df_cleaned, overview, metrics
+
+
+@st.cache_data(show_spinner=False)
+def compute_insights(df_critical_json: str):
     """Compute top keywords, bigrams, and complaint counts dynamically."""
+    df_critical = pd.read_json(df_critical_json, orient="split")
     return get_keyword_insights(df_critical)
 
 
 # -----------------------------------------------------------------------------
-# Sidebar Navigation and Data Source Selection
+# Sidebar — Data Source Selection
 # -----------------------------------------------------------------------------
 st.sidebar.title("🛍️ Feedback Intelligence")
 st.sidebar.caption("AI-Powered Customer Complaint Analysis & Response Assistant")
@@ -144,28 +283,113 @@ st.sidebar.markdown("---")
 
 data_source = st.sidebar.radio(
     "Data Source",
-    ["Default Dataset (Kaggle Reviews)", "Upload Custom CSV"],
-    index=0
+    ["Official Imarticus Dataset", "Upload Custom CSV"],
+    index=0,
+    key="data_source_radio"
 )
 
 uploaded_file = None
+source_to_load = None
+
 if data_source == "Upload Custom CSV":
-    uploaded_file = st.sidebar.file_uploader("Upload CSV file", type=["csv"])
-    if uploaded_file is None:
-        st.sidebar.info("Upload a CSV file or switch back to the default dataset.")
-    source_to_load = uploaded_file
+    uploaded_file = st.sidebar.file_uploader(
+        "Upload CSV file",
+        type=["csv"],
+        help="Upload any customer review CSV. Required columns: Review Text + Rating (any naming)."
+    )
+    if uploaded_file is not None:
+        source_to_load = uploaded_file
+    else:
+        st.sidebar.info("Upload a CSV or switch to the official dataset.")
 else:
-    source_to_load = DATA_PATH
+    # Official dataset — prefer local file, otherwise ask for upload
+    if DATA_PATH.exists():
+        source_to_load = DATA_PATH
+    else:
+        st.sidebar.warning("Official dataset not found locally.")
+        alt_upload = st.sidebar.file_uploader(
+            "Upload the official dataset CSV",
+            type=["csv"],
+            key="official_upload",
+            help="Download from Kaggle: Women's E-Commerce Clothing Reviews"
+        )
+        if alt_upload:
+            source_to_load = alt_upload
+        else:
+            st.sidebar.info("Download `Womens Clothing E-Commerce Reviews.csv` from Kaggle and upload it above.")
 
-# Load dataset
-if source_to_load is not None:
-    df_raw, df_cleaned, overview, error_msg = load_and_process_data(source_to_load)
-else:
-    df_raw, df_cleaned, overview, error_msg = None, None, None, "No dataset loaded."
+# ─── Load raw CSV ────────────────────────────────────────────────────────────
+if source_to_load is None:
+    # Nothing selected yet — show welcome screen
+    st.title("🛍️ Customer Feedback Intelligence")
+    st.markdown("""
+    ### Welcome
 
-if error_msg:
-    st.error(error_msg)
+    This application analyses customer review datasets and generates
+    AI-powered apology email drafts using Google Gemini.
+
+    **To get started:**
+    - Select **Official Imarticus Dataset** in the sidebar (or upload the CSV if not found locally), OR
+    - Select **Upload Custom CSV** to use your own customer review data.
+
+    **Compatible datasets** need at least these two columns (any naming):
+    | Purpose | Example names |
+    |---|---|
+    | Review Text | `Review Text`, `review`, `comment`, `feedback`, `customer_review` |
+    | Rating | `Rating`, `stars`, `score`, `overall`, `satisfaction` |
+    """)
     st.stop()
+
+df_raw, load_error = load_raw_csv(source_to_load)
+if load_error:
+    st.error(load_error)
+    st.stop()
+
+# ─── Schema Detection ─────────────────────────────────────────────────────────
+# For official local path with exact column names, skip the expanded UI
+_is_path_source = isinstance(source_to_load, Path)
+_detection_quick = detect_schema(df_raw)
+
+if _detection_quick.is_official_dataset and _is_path_source:
+    # Fast path: official dataset loaded from local file — no UI needed
+    df_mapped = df_raw.copy()
+    dataset_info = {
+        "detection": _detection_quick,
+        "threshold": 2,
+        "is_official": True,
+        "optional_found": _detection_quick.optional_found,
+    }
+    mapping_error = None
+else:
+    # Full schema detection + UI (for uploaded files or non-official CSVs)
+    with st.container():
+        st.markdown("### 🔍 Dataset Detection")
+        df_mapped, dataset_info, mapping_error = run_schema_detection_ui(df_raw)
+
+    if mapping_error or df_mapped is None:
+        st.stop()
+
+# ─── Clean & process ─────────────────────────────────────────────────────────
+try:
+    df_mapped_json = df_mapped.to_json(orient="split", date_format="iso")
+    df_cleaned, overview, cleaning_metrics = process_mapped_data(df_mapped_json)
+except Exception as exc:
+    st.error(f"Data processing failed: {exc}")
+    st.stop()
+
+_threshold = dataset_info.get("threshold", 2)
+_is_official = dataset_info.get("is_official", False)
+
+
+# ─── Sidebar: critical threshold & Gemini status ─────────────────────────────
+st.sidebar.markdown("---")
+if _is_official:
+    st.sidebar.success("🟢 Imarticus Dataset")
+else:
+    st.sidebar.info("🔵 Compatible Dataset")
+
+st.sidebar.caption(f"**Critical threshold:** Rating ≤ {_threshold}")
+st.sidebar.caption(f"**Rows:** {overview.cleaned_rows:,} cleaned / {overview.total_raw_rows:,} raw")
 
 # Navigation pages
 page = st.sidebar.radio(
@@ -191,16 +415,46 @@ if has_key:
 else:
     st.sidebar.warning("API Key: Fallback Mode")
 
+# Custom complaint terms (sidebar — optional power-user feature)
+st.sidebar.markdown("---")
+with st.sidebar.expander("🔧 Custom Complaint Terms", expanded=False):
+    st.caption("Enter additional terms to track (comma-separated).")
+    custom_terms_raw = st.text_input(
+        "Terms",
+        value="",
+        placeholder="e.g., damaged, wrinkled, faded",
+        key="custom_terms_input"
+    )
+    custom_terms: list[str] = [
+        t.strip().lower() for t in custom_terms_raw.split(",") if t.strip()
+    ]
+
 
 # -----------------------------------------------------------------------------
-# PAGE 1: OVERVIEW DASHBOARD
+# Helper: critical DataFrame with configurable threshold
 # -----------------------------------------------------------------------------
+def get_critical_df(df: pd.DataFrame, threshold: int = 2) -> pd.DataFrame:
+    return filter_critical_reviews(df, threshold=threshold)
+
+
+# =============================================================================
+# PAGE 1: OVERVIEW DASHBOARD
+# =============================================================================
 if page == "🏠 Overview Dashboard":
     st.title("Customer Feedback Intelligence")
-    st.subheader("Overview Dashboard")
+    if _is_official:
+        st.subheader("🟢 Overview Dashboard — Imarticus Assessment Dataset")
+    else:
+        st.subheader("🔵 Overview Dashboard — Custom Dataset")
     st.markdown("Automated analysis and decision-support metrics for retail customer feedback.")
 
-    # KPI Metric Cards
+    critical_df = get_critical_df(df_cleaned, _threshold)
+
+    # Recompute critical count / pct from actual threshold (may differ from overview)
+    actual_critical_count = len(critical_df)
+    actual_critical_pct = round(actual_critical_count / overview.cleaned_rows * 100, 2) if overview.cleaned_rows else 0.0
+    min_rating = int(df_cleaned["Rating"].min()) if len(df_cleaned) else 1
+
     kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
     with kpi1:
         st.markdown(f"""
@@ -219,28 +473,27 @@ if page == "🏠 Overview Dashboard":
     with kpi3:
         st.markdown(f"""
         <div class="metric-card">
-            <div class="metric-label">Critical (<= 2★)</div>
-            <div class="metric-value">{overview.critical_reviews_count:,}</div>
+            <div class="metric-label">Critical (≤ {_threshold}★)</div>
+            <div class="metric-value">{actual_critical_count:,}</div>
         </div>
         """, unsafe_allow_html=True)
     with kpi4:
         st.markdown(f"""
         <div class="metric-card">
             <div class="metric-label">Critical Rate</div>
-            <div class="metric-value">{overview.critical_percentage}%</div>
+            <div class="metric-value">{actual_critical_pct}%</div>
         </div>
         """, unsafe_allow_html=True)
     with kpi5:
         st.markdown(f"""
         <div class="metric-card">
-            <div class="metric-label">1-Star Severe</div>
-            <div class="metric-value">{overview.one_star_count:,}</div>
+            <div class="metric-label">{min_rating}-Star (Severe)</div>
+            <div class="metric-value">{overview.rating_distribution.get(min_rating, 0):,}</div>
         </div>
         """, unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Charts: Rating Distribution & Department Breakdown
     col_chart1, col_chart2 = st.columns(2)
 
     with col_chart1:
@@ -263,7 +516,8 @@ if page == "🏠 Overview Dashboard":
         st.plotly_chart(fig_rating, use_container_width=True)
 
     with col_chart2:
-        st.markdown("#### Reviews by Department")
+        dept_label = "Department Name" if "Department Name" in df_cleaned.columns else "Category"
+        st.markdown(f"#### Reviews by {dept_label}")
         dept_df = pd.DataFrame([
             {"Department": k, "Count": v}
             for k, v in overview.department_distribution.items()
@@ -278,34 +532,66 @@ if page == "🏠 Overview Dashboard":
         fig_dept.update_layout(height=350, margin=dict(t=20, b=20, l=20, r=20))
         st.plotly_chart(fig_dept, use_container_width=True)
 
-    # Data Cleaning Summary Expander
     with st.expander("🔍 View Data Cleaning Audit Details", expanded=False):
         c1, c2, c3 = st.columns(3)
         c1.metric("Raw Ingested Rows", f"{overview.total_raw_rows:,}")
         c2.metric("Post-Cleaning Rows", f"{overview.cleaned_rows:,}")
         c3.metric("Artifacts Removed", f"{overview.total_raw_rows - overview.cleaned_rows:,}")
+
+        det = dataset_info.get("detection")
+        col_summary = []
+        if det:
+            col_summary.append(f"- **Review Text** mapped from `{det.mapping.review_text_col}`")
+            col_summary.append(f"- **Rating** mapped from `{det.mapping.rating_col}`")
+            if det.optional_found:
+                for canon, actual in det.optional_found.items():
+                    col_summary.append(f"- **{canon}** mapped from `{actual}`")
+            if det.optional_missing:
+                col_summary.append(f"- Optional columns not found: {', '.join(f'`{c}`' for c in det.optional_missing)}")
+
+        st.markdown("\n".join(col_summary) if col_summary else "")
         st.markdown("""
-        **Deterministic Cleaning Rules Applied:**
-        - Dropped index artifact column (`Unnamed: 0`).
-        - Converted `Rating` to numeric, coercing non-numeric values to `NaN`.
-        - Treated whitespace-only review text as missing.
-        - Dropped missing review texts and missing ratings.
-        - Imputed missing `Title` values with empty string.
-        - Filtered ratings to ensure strictly values between 1 and 5.
+        **Cleaning Rules Applied:**
+        - Dropped `Unnamed: 0` index artifact if present.
+        - Converted Rating to numeric (coercing invalids to NaN).
+        - Whitespace-only review text treated as missing.
+        - Dropped rows missing Review Text or Rating.
+        - Imputed missing Title with empty string (if column available).
+        - Filtered ratings to valid 1–5 range.
         - Removed exact duplicate entries.
-        - Normalized text for keyword indexing while preserving original review text for AI drafting.
+        - Generated `clean_text` column for keyword indexing.
         """)
 
+    # Custom complaint terms section (if user entered any)
+    if custom_terms:
+        st.markdown("---")
+        st.markdown("#### 🔧 Custom Complaint Term Frequencies")
+        from collections import Counter
+        combined_text = " ".join(df_cleaned["clean_text"].dropna().tolist())
+        custom_counts = {}
+        for term in custom_terms:
+            # Handle multi-word terms
+            custom_counts[term] = combined_text.count(term.replace("-", " ").replace("_", " "))
+        cust_df = pd.DataFrame(list(custom_counts.items()), columns=["Term", "Count"])
+        cust_df = cust_df.sort_values("Count", ascending=False)
+        st.dataframe(cust_df, use_container_width=True, hide_index=True)
 
-# -----------------------------------------------------------------------------
+
+# =============================================================================
 # PAGE 2: COMPLAINT INTELLIGENCE
-# -----------------------------------------------------------------------------
+# =============================================================================
 elif page == "📊 Complaint Intelligence":
     st.title("Complaint Intelligence")
     st.markdown("Deep dive into recurring complaint themes, keywords, and adjacent word pairs.")
 
-    critical_df = filter_critical_reviews(df_cleaned)
-    insights = compute_insights(critical_df)
+    critical_df = get_critical_df(df_cleaned, _threshold)
+
+    if critical_df.empty:
+        st.warning(f"No critical reviews found (Rating ≤ {_threshold}). Try adjusting the threshold.")
+        st.stop()
+
+    # Serialize for caching
+    insights = compute_insights(critical_df.to_json(orient="split"))
 
     tab_terms, tab_keywords, tab_bigrams, tab_insights = st.tabs([
         "Predefined Complaint Terms",
@@ -316,7 +602,7 @@ elif page == "📊 Complaint Intelligence":
 
     with tab_terms:
         st.markdown("#### Frequency of Predefined Problem Categories")
-        st.caption("Calculated dynamically across all critical reviews (`Rating <= 2`).")
+        st.caption(f"Calculated dynamically across all critical reviews (Rating ≤ {_threshold}).")
 
         terms_df = pd.DataFrame([
             {
@@ -338,12 +624,24 @@ elif page == "📊 Complaint Intelligence":
         fig_terms.update_traces(textposition="outside")
         fig_terms.update_layout(height=400, coloraxis_showscale=False)
         st.plotly_chart(fig_terms, use_container_width=True)
-
         st.dataframe(terms_df, use_container_width=True, hide_index=True)
+
+        # Custom terms tab-addon
+        if custom_terms:
+            st.markdown("---")
+            st.markdown("**Custom Complaint Terms (from sidebar):**")
+            combined_critical_text = " ".join(critical_df["clean_text"].dropna().tolist())
+            cust_rows = []
+            for term in custom_terms:
+                norm = term.replace("-", " ").replace("_", " ")
+                cnt = combined_critical_text.count(norm)
+                pct = round(cnt / len(critical_df) * 100, 2) if len(critical_df) else 0
+                cust_rows.append({"Term": term, "Mentions": cnt, "Prevalence (% of Critical)": pct})
+            st.dataframe(pd.DataFrame(cust_rows), use_container_width=True, hide_index=True)
 
     with tab_keywords:
         st.markdown("#### Top 15 Complaint Keywords")
-        st.caption("Extracted using Python `collections.Counter` with custom stopword filtering and minimum word length.")
+        st.caption("Extracted using Python `collections.Counter` with custom stopword filtering.")
 
         kw_df = pd.DataFrame([
             {"Keyword": k.term, "Frequency": k.count}
@@ -390,12 +688,15 @@ elif page == "📊 Complaint Intelligence":
         second_complaint = insights.predefined_terms[1].term if len(insights.predefined_terms) > 1 else "fabric"
         second_count = insights.predefined_terms[1].count if len(insights.predefined_terms) > 1 else 0
 
+        small_count = next((t.count for t in insights.predefined_terms if t.term == "small"), 0)
+        large_count = next((t.count for t in insights.predefined_terms if t.term == "large"), 0)
+
         st.info(f"""
         **Key Findings from Dynamic Dataset Calculation:**
         - **Primary Complaint Driver:** `{top_complaint.upper()}` is the most prominent dissatisfaction factor with **{top_count:,} mentions** across critical reviews.
-        - **Secondary Complaint Driver:** `{second_complaint.upper()}` follows closely with **{second_count:,} mentions**, indicating fabric quality and tactile comfort concerns.
-        - **Sizing Asymmetry:** Terms such as `small` ({next((t.count for t in insights.predefined_terms if t.term == 'small'), 0):,}) and `large` ({next((t.count for t in insights.predefined_terms if t.term == 'large'), 0):,}) demonstrate that size inconsistency is a primary trigger for customer returns.
-        - **Bigram Patterns:** Frequent phrases like `poor quality`, `see through`, and `too small` validate specific physical defects in garment construction.
+        - **Secondary Complaint Driver:** `{second_complaint.upper()}` follows with **{second_count:,} mentions**.
+        - **Sizing Asymmetry:** Terms `small` ({small_count:,}) and `large` ({large_count:,}) indicate size inconsistency is a primary trigger for returns.
+        - **Bigram Patterns:** Frequent phrases validate specific physical defects in product quality.
         """)
 
         st.markdown("##### Strategic Recommendations:")
@@ -403,84 +704,104 @@ elif page == "📊 Complaint Intelligence":
         with col_rec1:
             st.markdown("""
             **For Merchandising & Sizing Teams:**
-            1. Standardize fit charts and include detailed model measurement notes on PDPs.
-            2. Investigate high-return SKUs flagged for unexpected shrinkage or sizing variance.
+            1. Standardize fit charts with detailed measurement notes.
+            2. Investigate high-return SKUs for sizing variance.
             """)
         with col_rec2:
             st.markdown("""
             **For Quality Control & Support Teams:**
-            1. Fabric opacity testing before bulk manufacturing to eliminate `see-through` complaints.
-            2. Proactive customer reach-out for 1-star reviews offering streamlined exchange workflows.
+            1. Proactive customer outreach for lowest-rated reviews.
+            2. Streamlined exchange workflows for repeat complaint categories.
             """)
 
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # PAGE 3: CRITICAL REVIEWS QUEUE
-# -----------------------------------------------------------------------------
+# =============================================================================
 elif page == "🚨 Critical Reviews Queue":
     st.title("Critical Reviews Queue")
-    st.markdown("Filter, search, and review all critical feedback identified by rule `Rating <= 2`.")
+    st.markdown(f"Filter, search, and review all critical feedback identified by rule `Rating ≤ {_threshold}`.")
 
-    critical_df = filter_critical_reviews(df_cleaned)
+    critical_df = get_critical_df(df_cleaned, _threshold)
 
-    # Filter Controls
+    # Filter controls
     col_f1, col_f2, col_f3 = st.columns([1, 1, 2])
+
+    min_r = int(df_cleaned["Rating"].min()) if len(df_cleaned) else 1
+    max_r = int(_threshold)
+
     with col_f1:
-        rating_filter = st.selectbox("Rating Filter", ["All Critical (1 & 2 Stars)", "1 Star Only", "2 Stars Only"])
+        rating_opts = ["All Critical"] + [f"{r} Star" for r in range(min_r, max_r + 1)]
+        rating_filter = st.selectbox("Rating Filter", rating_opts)
+
     with col_f2:
-        depts = ["All Departments"] + sorted([str(d) for d in df_cleaned["Department Name"].dropna().unique()])
-        dept_filter = st.selectbox("Department", depts)
+        if "Department Name" in df_cleaned.columns:
+            depts = ["All Departments"] + sorted([str(d) for d in df_cleaned["Department Name"].dropna().unique()])
+            dept_filter = st.selectbox("Department", depts)
+        else:
+            dept_filter = "All Departments"
+            st.caption("(Department column not available)")
+
     with col_f3:
         search_query = st.text_input("🔍 Search keyword in review or title", placeholder="e.g., fabric, zipper, small...")
 
     # Apply filters
     filtered = critical_df.copy()
-    if rating_filter == "1 Star Only":
-        filtered = filtered[filtered["Rating"] == 1]
-    elif rating_filter == "2 Stars Only":
-        filtered = filtered[filtered["Rating"] == 2]
+    if rating_filter != "All Critical":
+        selected_r = int(rating_filter.split(" ")[0])
+        filtered = filtered[filtered["Rating"] == selected_r]
 
-    if dept_filter != "All Departments":
+    if dept_filter != "All Departments" and "Department Name" in filtered.columns:
         filtered = filtered[filtered["Department Name"].astype(str) == dept_filter]
 
     if search_query.strip():
         term = search_query.strip().lower()
-        filtered = filtered[
-            filtered["clean_text"].str.contains(term, na=False) |
-            filtered["Title"].astype(str).str.lower().str.contains(term, na=False)
-        ]
+        mask = filtered["clean_text"].str.contains(term, na=False)
+        if "Title" in filtered.columns:
+            mask = mask | filtered["Title"].astype(str).str.lower().str.contains(term, na=False)
+        filtered = filtered[mask]
 
     st.caption(f"Showing **{len(filtered):,}** matching critical reviews")
 
-    # Display Table
-    table_display = filtered[[
-        "Rating", "Title", "Review Text", "Department Name", "Class Name", "Clothing ID"
-    ]].copy()
-    st.dataframe(table_display, use_container_width=True, height=400)
+    # Build display table with only available columns
+    display_cols = ["Rating", "Review Text"]
+    for opt_col in ["Title", "Department Name", "Class Name", "Clothing ID"]:
+        if opt_col in filtered.columns:
+            display_cols.append(opt_col)
+
+    st.dataframe(filtered[display_cols], use_container_width=True, height=400)
 
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # PAGE 4: TOP 3 SEVERE COMPLAINTS
-# -----------------------------------------------------------------------------
+# =============================================================================
 elif page == "⭐ Top 3 Severe Complaints":
     st.title("⭐ Top 3 Most Critical Reviews")
-    st.markdown("""
-    **Assessment Selection Rule:**
-    > Filter for lowest rating (`Rating == 1`), then rank descending by original `Review Text` character length.
+    min_rating = int(df_cleaned["Rating"].min()) if len(df_cleaned) else 1
+    st.markdown(f"""
+    **Selection Rule:**
+    > Filter for minimum rating (`Rating == {min_rating}`), then rank descending by original `Review Text` character length.
 
-    *Why this rule?* 1-star reviews represent peak customer dissatisfaction. Sorting by character length prioritizes detailed, articulate complaints providing the specific context required to craft genuinely empathetic apology emails.
+    *Why this rule?* Lowest-rated reviews represent peak customer dissatisfaction. Sorting by character length prioritizes detailed, articulate complaints providing the specific context required for empathetic apology emails.
     """)
 
-    top_3_response = select_top_critical_reviews(df_cleaned, n=3)
+    try:
+        top_3_response = select_top_critical_reviews(df_cleaned, n=3)
+    except ValueError as exc:
+        st.error(f"Could not select top 3 reviews: {exc}")
+        st.stop()
+
+    st.caption(f"*Selection rule used: {top_3_response.selection_rule}*")
 
     for i, review in enumerate(top_3_response.reviews):
         with st.container():
             st.markdown(f"### Rank {i+1} — {review.title if review.title else '(No Title)'}")
-            c_meta1, c_meta2, c_meta3, c_meta4 = st.columns(4)
-            c_meta1.markdown(f"**Rating:** {'★' * review.rating}{'☆' * (5 - review.rating)} (1/5)")
-            c_meta2.markdown(f"**Length:** {review.review_length} characters")
-            c_meta3.markdown(f"**Department:** {review.department_name or 'N/A'}")
-            c_meta4.markdown(f"**Clothing ID:** #{review.clothing_id or 'N/A'}")
+
+            meta_cols = st.columns(4)
+            meta_cols[0].markdown(f"**Rating:** {'★' * review.rating}{'☆' * max(0, 5 - review.rating)} ({review.rating}/5)")
+            meta_cols[1].markdown(f"**Length:** {review.review_length} characters")
+            meta_cols[2].markdown(f"**Department:** {review.department_name or 'N/A'}")
+            meta_cols[3].markdown(f"**Product ID:** #{review.clothing_id or 'N/A'}")
 
             st.markdown(f"""
             <div class="review-quote">
@@ -492,19 +813,18 @@ elif page == "⭐ Top 3 Severe Complaints":
                 badges = " ".join([f"`{c}`" for c in review.detected_complaints])
                 st.markdown(f"**Detected Complaint Categories:** {badges}")
 
-            # Quick action to load into AI generator
             if st.button(f"Draft AI Response for Case {i+1}", key=f"btn_case_{i+1}"):
                 st.session_state["selected_review_text"] = review.review_text
                 st.session_state["selected_rating"] = review.rating
                 st.session_state["selected_title"] = review.title
                 st.session_state["selected_dept"] = review.department_name
-                st.info("Loaded into AI Response Generator! Please navigate to '🤖 AI Response Generator' in the sidebar.")
+                st.info("Loaded into AI Response Generator! Navigate to '🤖 AI Response Generator' in the sidebar.")
             st.markdown("---")
 
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # PAGE 5: AI RESPONSE GENERATOR
-# -----------------------------------------------------------------------------
+# =============================================================================
 elif page == "🤖 AI Response Generator":
     st.title("🤖 AI Apology Response Assistant")
     st.markdown("""
@@ -513,45 +833,56 @@ elif page == "🤖 AI Response Generator":
     ⚠️ **Human-in-the-Loop Protocol:** *AI drafts must be reviewed and approved by human support staff before transmission.*
     """)
 
-    # Populate default selection from top-3 if empty
-    top_3_response = select_top_critical_reviews(df_cleaned, n=3)
-    default_text = st.session_state.get("selected_review_text", top_3_response.reviews[0].review_text)
-    default_rating = st.session_state.get("selected_rating", top_3_response.reviews[0].rating)
-    default_title = st.session_state.get("selected_title", top_3_response.reviews[0].title)
+    try:
+        top_3_response = select_top_critical_reviews(df_cleaned, n=3)
+        default_text = st.session_state.get("selected_review_text", top_3_response.reviews[0].review_text)
+        default_rating = st.session_state.get("selected_rating", top_3_response.reviews[0].rating)
+        default_title = st.session_state.get("selected_title", top_3_response.reviews[0].title)
+        has_presets = True
+    except ValueError:
+        default_text = ""
+        default_rating = 1
+        default_title = ""
+        has_presets = False
 
     col_in, col_out = st.columns([1, 1])
 
     with col_in:
         st.markdown("#### Customer Review Context")
-        preset_choice = st.selectbox(
-            "Select Review Preset",
-            ["Preset: Top 1-Star Review #1", "Preset: Top 1-Star Review #2", "Preset: Top 1-Star Review #3", "Custom Review Input"]
-        )
 
-        if preset_choice == "Preset: Top 1-Star Review #1":
-            cur_r = top_3_response.reviews[0]
-            inp_text = cur_r.review_text
-            inp_rating = cur_r.rating
-            inp_title = cur_r.title
-        elif preset_choice == "Preset: Top 1-Star Review #2":
-            cur_r = top_3_response.reviews[1]
-            inp_text = cur_r.review_text
-            inp_rating = cur_r.rating
-            inp_title = cur_r.title
-        elif preset_choice == "Preset: Top 1-Star Review #3":
-            cur_r = top_3_response.reviews[2]
-            inp_text = cur_r.review_text
-            inp_rating = cur_r.rating
-            inp_title = cur_r.title
+        if has_presets:
+            preset_choice = st.selectbox(
+                "Select Review Preset",
+                ["Preset: Top Review #1", "Preset: Top Review #2", "Preset: Top Review #3", "Custom Review Input"]
+            )
+            if preset_choice == "Preset: Top Review #1":
+                cur_r = top_3_response.reviews[0]
+            elif preset_choice == "Preset: Top Review #2":
+                cur_r = top_3_response.reviews[1]
+            elif preset_choice == "Preset: Top Review #3":
+                cur_r = top_3_response.reviews[2]
+            else:
+                cur_r = None
+
+            if cur_r:
+                inp_text = cur_r.review_text
+                inp_rating = cur_r.rating
+                inp_title = cur_r.title or ""
+                inp_dept = cur_r.department_name
+                st.markdown(f"**Title:** {inp_title if inp_title else '(No Title)'}")
+                st.markdown(f"**Rating:** {'★' * inp_rating} ({inp_rating}/5)")
+                st.markdown(f"""<div class="review-quote">"{inp_text}"</div>""", unsafe_allow_html=True)
+            else:
+                inp_text = st.text_area("Customer Review Text", value=default_text, height=180)
+                inp_rating = st.slider("Customer Rating", 1, 5, value=default_rating)
+                inp_title = st.text_input("Review Title", value=default_title)
+                inp_dept = None
         else:
-            inp_text = st.text_area("Customer Review Text", value=default_text, height=180)
-            inp_rating = st.slider("Customer Rating", 1, 5, value=default_rating)
-            inp_title = st.text_input("Review Title", value=default_title)
-
-        if preset_choice != "Custom Review Input":
-            st.markdown(f"**Title:** {inp_title if inp_title else '(No Title)'}")
-            st.markdown(f"**Rating:** {'★' * inp_rating} ({inp_rating}/5)")
-            st.markdown(f"""<div class="review-quote">"{inp_text}"</div>""", unsafe_allow_html=True)
+            st.info("No presets available — enter a custom review below.")
+            inp_text = st.text_area("Customer Review Text", height=180)
+            inp_rating = st.slider("Customer Rating", 1, 5, value=1)
+            inp_title = st.text_input("Review Title", value="")
+            inp_dept = None
 
         detected = detect_complaint_indicators(inp_text)
         if detected:
@@ -568,6 +899,7 @@ elif page == "🤖 AI Response Generator":
                     review_text=inp_text,
                     rating=inp_rating,
                     title=inp_title,
+                    department=inp_dept,
                 )
                 st.session_state["current_draft"] = draft
 
@@ -607,9 +939,9 @@ elif page == "🤖 AI Response Generator":
             st.info("Select a customer review on the left and click **'Generate AI Response Draft'** to view the personalized email.")
 
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # PAGE 6: SAFETY & VALIDATION
-# -----------------------------------------------------------------------------
+# =============================================================================
 elif page == "✅ Safety & Validation":
     st.title("✅ AI Safety & Guardrails Engine")
     st.markdown("""
@@ -654,9 +986,9 @@ elif page == "✅ Safety & Validation":
                 st.markdown(f"- ❌ **{rule.replace('_', ' ').title()}:** {msg}")
 
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # PAGE 7: ABOUT & METHODOLOGY
-# -----------------------------------------------------------------------------
+# =============================================================================
 elif page == "ℹ️ About / Methodology":
     st.title("ℹ️ Methodology & Architecture")
     st.markdown("""
@@ -667,15 +999,17 @@ elif page == "ℹ️ About / Methodology":
     This project demonstrates the transition from exploratory data science to a production-grade enterprise decision-support tool.
     
     ```
-    Customer Reviews CSV
+    Customer Reviews CSV  (official OR compatible dataset)
+            ↓
+    Smart Schema Detection  (50+ column aliases, auto-mapping)
             ↓
     Deterministic Pandas Cleaning
             ↓
-    Rule-Based Critical Filter (Rating <= 2)
+    Rule-Based Critical Filter (Rating ≤ threshold)
             ↓
     Keyword & Bigram Counter Analysis
             ↓
-    Deterministic Top-3 Severe Selection (Rating == 1, Longest Text)
+    Deterministic Top-3 Severe Selection (min rating, longest text)
             ↓
     Google Gemini Apology Draft Generation
             ↓
@@ -684,16 +1018,19 @@ elif page == "ℹ️ About / Methodology":
     Human Support Staff Review & Dispatch
     ```
 
-    #### 2. Why Rule-Based Filtering instead of ML?
-    1. **100% Deterministic & Auditable:** Customer support teams require clear, unambiguous criteria for escalations.
-    2. **Zero False Positives from Model Drift:** Ratings of 1 and 2 stars are explicitly defined negative experiences.
-    3. **No Training/Annotation Overhead:** Enables instant cold-start operation on any e-commerce dataset without labeled training sets.
+    #### 2. Smart Dataset Support
+    The application accepts **any customer-review CSV** with at least a review text and rating column, using any of 50+ recognised column name aliases.  The official Imarticus Women's Clothing dataset is auto-detected by its schema fingerprint.
 
-    #### 3. Technology Stack
+    #### 3. Why Rule-Based Filtering instead of ML?
+    1. **100% Deterministic & Auditable:** Customer support teams require clear, unambiguous criteria.
+    2. **Zero False Positives from Model Drift:** Ratings of 1 and 2 stars are explicitly defined negative experiences.
+    3. **No Training/Annotation Overhead:** Enables instant cold-start operation on any e-commerce dataset.
+
+    #### 4. Technology Stack
     - **Language:** Python 3.11
     - **Data Processing:** Pandas, NumPy
-    - **Visualization:** Plotly, Matplotlib, Seaborn
+    - **Visualization:** Plotly, Matplotlib
     - **Generative AI:** Google GenAI SDK (`google-genai`), Gemini 2.5 / 3.1 / 3.8
     - **UI Dashboard:** Streamlit
-    - **Testing:** Pytest (14 passing unit tests)
+    - **Testing:** Pytest (36 passing unit tests)
     """)

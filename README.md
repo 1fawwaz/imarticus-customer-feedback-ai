@@ -80,10 +80,22 @@ The system acts as an **assistive drafting tool**, never sending emails autonomo
 7. **Deduplication:** Remove exact duplicate records (`drop_duplicates()`).
 8. **Text Normalization:** Create `clean_text` column (lowercased, stripped digits/special characters, whitespace normalized) while **strictly preserving original `Review Text`** for contextual AI drafting.
 
-**Data Metrics:**
+**Data Metrics (Official Assessment Dataset):**
 - Raw rows: **23,486**
 - Cleaned rows: **22,640**
 - Rows removed: **846** (missing text/ratings and duplicates)
+
+---
+
+### 3.1 Smart Schema Detection & Universal CSV Support
+
+Beyond the official dataset, the application dynamically accepts **any customer review CSV** via `src/schema_detection.py`:
+
+- **Automatic Fingerprint Recognition:** If the CSV matches the Imarticus Women's Clothing review columns, it is tagged `🟢 Imarticus Assessment Dataset Detected`.
+- **Flexible Column Mapping:** Detects 15+ aliases for review text (`review text`, `customer_review`, `comment`, `feedback`, `body`, `review_content`, etc.) and 15+ aliases for rating (`rating`, `score`, `stars`, `overall`, `star_rating`, etc.), case- and whitespace-insensitively.
+- **Graceful Optional Column Handling:** Columns such as Department, Clothing ID, Title, and Age are mapped if present; missing optional columns degrade gracefully without breaking any visual or analytical component.
+- **Configurable Critical Threshold:** For non-standard scales (e.g., 1–10), users can adjust the critical triage threshold dynamically in the sidebar.
+- **Graceful Rejection:** Unrelated datasets (e.g. employee rosters, financial sheets) are rejected with clear, friendly diagnostic messages indicating required columns.
 
 ---
 
@@ -175,6 +187,7 @@ imarticus_customer_feedback_project/
 │   ├── __init__.py
 │   ├── config.py                      # Paths, models, stopwords, system prompt
 │   ├── schemas.py                     # Pydantic data models & transfer schemas
+│   ├── schema_detection.py            # Smart CSV schema detection & alias mapping
 │   ├── cleaning.py                    # Deterministic data cleaning pipeline
 │   ├── analysis.py                    # Dataset overview & query filtering
 │   ├── complaint_analysis.py          # Counter keywords, bigrams & terms
@@ -183,8 +196,9 @@ imarticus_customer_feedback_project/
 │   ├── validators.py                  # Guardrails & safety validator
 │   └── automation.py                  # Batch pipeline generating outputs
 │
-├── tests/                             # Comprehensive test suite (14 passing tests)
+├── tests/                             # Comprehensive test suite (36 passing tests)
 │   ├── __init__.py
+│   ├── test_schema_detection.py       # 22 schema detection & multi-dataset tests
 │   ├── test_cleaning.py               # Missing data, deduplication, clean_text
 │   ├── test_analysis.py               # Rule-based filter & indicator detection
 │   ├── test_complaint_analysis.py     # Keywords, bigrams & see-through tests

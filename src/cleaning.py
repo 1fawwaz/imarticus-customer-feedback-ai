@@ -1,8 +1,13 @@
-"""Data cleaning and normalization module for customer reviews."""
+"""Data cleaning and normalization module for customer reviews.
+
+Works with both the official Imarticus Women's Clothing dataset and any other
+compatible CSV that has been normalized to canonical column names via
+:mod:`src.schema_detection`.
+"""
 
 import re
 from pathlib import Path
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, Optional
 import pandas as pd
 
 from src.schemas import CleaningMetrics
@@ -35,12 +40,17 @@ def load_raw_dataset(csv_path: Path) -> pd.DataFrame:
 def clean_dataset(df_raw: pd.DataFrame) -> Tuple[pd.DataFrame, CleaningMetrics]:
     """Execute standard deterministic data cleaning pipeline.
 
+    Accepts any DataFrame that has been column-mapped to canonical names via
+    :func:`src.schema_detection.apply_mapping`.  Only ``Review Text`` and
+    ``Rating`` are strictly required; all other columns are treated as optional
+    and are preserved as-is when present.
+
     Rules applied:
     1. Remove 'Unnamed: 0' index artifact if present.
     2. Convert 'Rating' to numeric, coercing invalid values to NaN.
     3. Treat whitespace-only review text as missing (NA).
     4. Drop rows with missing 'Review Text' or 'Rating'.
-    5. Impute missing 'Title' with empty string.
+    5. Impute missing 'Title' with empty string (if column exists).
     6. Validate that ratings strictly lie in the range 1-5.
     7. Remove exact duplicate rows.
     8. Generate a 'clean_text' column while strictly preserving original 'Review Text'.
@@ -50,7 +60,7 @@ def clean_dataset(df_raw: pd.DataFrame) -> Tuple[pd.DataFrame, CleaningMetrics]:
     """
     rows_before = len(df_raw)
 
-    # 1. Drop index column artifact
+    # 1. Drop index column artifact (only present in the official Kaggle export)
     df = df_raw.drop(columns=["Unnamed: 0"], errors="ignore").copy()
 
     # 2. Convert Rating to numeric
@@ -66,8 +76,9 @@ def clean_dataset(df_raw: pd.DataFrame) -> Tuple[pd.DataFrame, CleaningMetrics]:
     # 4. Drop missing Review Text and Rating
     df = df.dropna(subset=["Review Text", "Rating"]).copy()
 
-    # 5. Impute missing Title
-    df["Title"] = df["Title"].fillna("")
+    # 5. Impute missing Title (only if the column exists)
+    if "Title" in df.columns:
+        df["Title"] = df["Title"].fillna("")
 
     # 6. Validate rating boundaries 1-5
     df = df[(df["Rating"] >= 1) & (df["Rating"] <= 5)].copy()

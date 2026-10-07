@@ -1,4 +1,9 @@
-"""Statistical and rule-based review analysis module."""
+"""Statistical and rule-based review analysis module.
+
+Works with both the official Imarticus dataset and any compatible dataset whose
+columns have been normalized to canonical names via :mod:`src.schema_detection`.
+All optional column accesses are guarded against KeyError / AttributeError.
+"""
 
 from typing import Dict, Any, List, Optional
 import pandas as pd
@@ -7,13 +12,16 @@ from src.schemas import DatasetOverview, ReviewItem
 from src.config import PREDEFINED_COMPLAINT_TERMS
 
 
-def filter_critical_reviews(df: pd.DataFrame) -> pd.DataFrame:
-    """Filter reviews using the mandatory rule-based condition: Rating <= 2.
+def filter_critical_reviews(df: pd.DataFrame, threshold: int = 2) -> pd.DataFrame:
+    """Filter reviews using the mandatory rule-based condition: Rating <= threshold.
+
+    The default threshold of 2 implements the official assessment rule (Rating <= 2).
+    For non-standard rating scales the caller may supply a different threshold.
 
     NO machine learning model or trained classifier is utilized.
     This rule is fully auditable and deterministic.
     """
-    return df[df["Rating"] <= 2].copy()
+    return df[df["Rating"] <= threshold].copy()
 
 
 def detect_complaint_indicators(text: str) -> List[str]:
@@ -30,6 +38,17 @@ def detect_complaint_indicators(text: str) -> List[str]:
     return matched
 
 
+def _safe_col(row: pd.Series, col: str, cast=str, default=None):
+    """Safely retrieve a column value; return default if column missing or NaN."""
+    val = row.get(col)
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return default
+    try:
+        return cast(val)
+    except (ValueError, TypeError):
+        return default
+
+
 def get_dataset_overview(df_raw: pd.DataFrame, df_cleaned: pd.DataFrame) -> DatasetOverview:
     """Calculate aggregate dataset metrics and distributions."""
     critical_df = filter_critical_reviews(df_cleaned)
@@ -40,9 +59,12 @@ def get_dataset_overview(df_raw: pd.DataFrame, df_cleaned: pd.DataFrame) -> Data
     rating_counts = df_cleaned["Rating"].value_counts().to_dict()
     rating_dist = {int(k): int(v) for k, v in rating_counts.items()}
 
-    # Department breakdown (impute missing with 'Unknown')
-    dept_series = df_cleaned["Department Name"].fillna("Unspecified")
-    dept_dist = {str(k): int(v) for k, v in dept_series.value_counts().head(8).to_dict().items()}
+    # Department breakdown (only if column exists)
+    if "Department Name" in df_cleaned.columns:
+        dept_series = df_cleaned["Department Name"].fillna("Unspecified")
+        dept_dist = {str(k): int(v) for k, v in dept_series.value_counts().head(8).to_dict().items()}
+    else:
+        dept_dist = {"All": total_cleaned}
 
     # Calculate top complaint term in critical reviews
     from src.complaint_analysis import get_predefined_term_counts
@@ -79,15 +101,18 @@ def query_reviews(
     elif rating is not None:
         subset = subset[subset["Rating"] == rating]
 
-    if department and department.strip():
+    if department and department.strip() and "Department Name" in subset.columns:
         subset = subset[subset["Department Name"].astype(str).str.lower() == department.strip().lower()]
 
     if search_keyword and search_keyword.strip():
         term = search_keyword.strip().lower()
-        subset = subset[subset["clean_text"].str.contains(term, na=False, regex=False)]
+        mask = subset["clean_text"].str.contains(term, na=False, regex=False)
+        if "Title" in subset.columns:
+            mask = mask | subset["Title"].astype(str).str.lower().str.contains(term, na=False)
+        subset = subset[mask]
 
     # Slice requested window
-    paged = subset.iloc[offset : offset + limit]
+    paged = subset.iloc[offset: offset + limit]
 
     items: List[ReviewItem] = []
     for idx, row in paged.iterrows():
@@ -96,16 +121,16 @@ def query_reviews(
         items.append(
             ReviewItem(
                 index=int(idx),
-                clothing_id=int(row["Clothing ID"]) if pd.notna(row.get("Clothing ID")) else None,
-                age=int(row["Age"]) if pd.notna(row.get("Age")) else None,
-                title=str(row.get("Title", "")),
+                clothing_id=_safe_col(row, "Clothing ID", int),
+                age=_safe_col(row, "Age", int),
+                title=_safe_col(row, "Title", str, default=""),
                 review_text=review_text,
                 rating=rating_val,
-                recommended=int(row["Recommended IND"]) if pd.notna(row.get("Recommended IND")) else None,
-                positive_feedback_count=int(row["Positive Feedback Count"]) if pd.notna(row.get("Positive Feedback Count")) else None,
-                division_name=str(row.get("Division Name", "")) if pd.notna(row.get("Division Name")) else None,
-                department_name=str(row.get("Department Name", "")) if pd.notna(row.get("Department Name")) else None,
-                class_name=str(row.get("Class Name", "")) if pd.notna(row.get("Class Name")) else None,
+                recommended=_safe_col(row, "Recommended IND", int),
+                positive_feedback_count=_safe_col(row, "Positive Feedback Count", int),
+                division_name=_safe_col(row, "Division Name", str),
+                department_name=_safe_col(row, "Department Name", str),
+                class_name=_safe_col(row, "Class Name", str),
                 clean_text=str(row.get("clean_text", "")),
                 review_length=len(review_text),
                 is_critical=rating_val <= 2,
