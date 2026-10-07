@@ -5,23 +5,55 @@ columns have been normalized to canonical names via :mod:`src.schema_detection`.
 All optional column accesses are guarded against KeyError / AttributeError.
 """
 
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Union
 import pandas as pd
 
 from src.schemas import DatasetOverview, ReviewItem
 from src.config import PREDEFINED_COMPLAINT_TERMS
 
 
-def filter_critical_reviews(df: pd.DataFrame, threshold: int = 2) -> pd.DataFrame:
+def filter_critical_reviews(df: pd.DataFrame, threshold: Union[int, float] = 2) -> pd.DataFrame:
     """Filter reviews using the mandatory rule-based condition: Rating <= threshold.
 
     The default threshold of 2 implements the official assessment rule (Rating <= 2).
-    For non-standard rating scales the caller may supply a different threshold.
+    For non-standard rating scales or custom datasets, callers may supply a threshold.
+
+    Validates:
+    - 'Rating' column exists in df (raises ValueError with descriptive message if missing)
+    - Threshold is numeric (raises ValueError if non-numeric)
+    - 'Rating' values can be interpreted numerically (raises ValueError if entirely non-numeric)
+    - Original DataFrame is preserved without in-place modification
+    - Returns a new DataFrame copy containing only matching rows
 
     NO machine learning model or trained classifier is utilized.
     This rule is fully auditable and deterministic.
     """
-    return df[df["Rating"] <= threshold].copy()
+    if "Rating" not in df.columns:
+        raise ValueError(
+            "Column 'Rating' is missing from DataFrame. "
+            "Please ensure the dataset contains a mapped 'Rating' column before filtering."
+        )
+
+    try:
+        num_threshold = float(threshold)
+    except (ValueError, TypeError):
+        raise ValueError(
+            f"Invalid threshold '{threshold}'. Threshold must be a numeric value."
+        )
+
+    if df.empty:
+        return df.copy()
+
+    # Safely interpret Rating as numeric without mutating input DataFrame
+    numeric_ratings = pd.to_numeric(df["Rating"], errors="coerce")
+    if numeric_ratings.dropna().empty:
+        raise ValueError(
+            "Column 'Rating' contains non-numeric values that cannot be interpreted as ratings."
+        )
+
+    # Boolean condition: Rating <= num_threshold (ignoring NaNs)
+    mask = (numeric_ratings <= num_threshold) & numeric_ratings.notna()
+    return df[mask].copy()
 
 
 def detect_complaint_indicators(text: str) -> List[str]:
@@ -49,9 +81,13 @@ def _safe_col(row: pd.Series, col: str, cast=str, default=None):
         return default
 
 
-def get_dataset_overview(df_raw: pd.DataFrame, df_cleaned: pd.DataFrame) -> DatasetOverview:
+def get_dataset_overview(
+    df_raw: pd.DataFrame,
+    df_cleaned: pd.DataFrame,
+    threshold: Union[int, float] = 2
+) -> DatasetOverview:
     """Calculate aggregate dataset metrics and distributions."""
-    critical_df = filter_critical_reviews(df_cleaned)
+    critical_df = filter_critical_reviews(df_cleaned, threshold=threshold)
     total_cleaned = len(df_cleaned)
     critical_count = len(critical_df)
     critical_pct = round((critical_count / total_cleaned * 100), 2) if total_cleaned > 0 else 0.0
@@ -92,12 +128,13 @@ def query_reviews(
     search_keyword: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
+    critical_threshold: Union[int, float] = 2,
 ) -> List[ReviewItem]:
     """Filter and page reviews for UI display."""
     subset = df.copy()
 
     if is_critical_only:
-        subset = subset[subset["Rating"] <= 2]
+        subset = filter_critical_reviews(subset, threshold=critical_threshold)
     elif rating is not None:
         subset = subset[subset["Rating"] == rating]
 
@@ -133,7 +170,7 @@ def query_reviews(
                 class_name=_safe_col(row, "Class Name", str),
                 clean_text=str(row.get("clean_text", "")),
                 review_length=len(review_text),
-                is_critical=rating_val <= 2,
+                is_critical=rating_val <= critical_threshold,
                 detected_complaints=detect_complaint_indicators(review_text),
             )
         )

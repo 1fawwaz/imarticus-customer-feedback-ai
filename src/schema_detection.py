@@ -206,6 +206,21 @@ class DetectionResult:
     ambiguous_fields: List[str] = field(default_factory=list)
     error: Optional[str] = None
 
+    @property
+    def is_valid(self) -> bool:
+        """Alias for compatible."""
+        return self.compatible
+
+    @property
+    def review_text_col(self) -> Optional[str]:
+        """Convenience property for mapped review text column."""
+        return self.mapping.review_text_col if self.mapping else None
+
+    @property
+    def rating_col(self) -> Optional[str]:
+        """Convenience property for mapped rating column."""
+        return self.mapping.rating_col if self.mapping else None
+
 
 # ---------------------------------------------------------------------------
 # Core helpers
@@ -377,6 +392,6 @@ def get_critical_threshold(result: DetectionResult) -> Tuple[float, bool]:
     if result.is_official_dataset:
         return 2.0, True
     if result.rating_min is not None and result.rating_max is not None:
-        if result.rating_min >= 1 and result.rating_max <= 5:
-            return 2.0, True   # Same scale, use default
-    return 2.0, False           # Different scale — flag for user confirmation
+        if result.rating_min == 1 and result.rating_max == 5:
+            return 2.0, True   # Exact standard 1-5 scale
+    return 2.0, False           # Custom or non-standard scale (e.g. 2-5, 1-10)

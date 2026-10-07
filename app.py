@@ -214,19 +214,26 @@ Please upload a compatible customer-review CSV containing at least a **Review Te
 
     # --- Non-standard scale confirmation ---
     if not is_default:
-        r_min = detection.rating_min or 1
-        r_max = detection.rating_max or 10
-        st.warning(f"⚠️ Rating scale `{int(r_min)}–{int(r_max)}` differs from the standard 1–5. Please confirm the critical-review threshold.")
+        r_min = int(detection.rating_min) if detection.rating_min is not None else 1
+        r_max = int(detection.rating_max) if detection.rating_max is not None else 10
+        st.warning(f"⚠️ Rating scale `{r_min}–{r_max}` differs from the standard 1–5. Please confirm the critical-review threshold.")
+        st.markdown(f"**Rating Scale:** `{r_min}–{r_max}`")
         custom_threshold = st.slider(
-            "Critical Rating Threshold (reviews at or below this are flagged as critical)",
-            min_value=int(r_min),
-            max_value=int(r_max),
-            value=int(round((r_max - r_min) * 0.3 + r_min)),   # default ~30th percentile
+            "Critical Rating Threshold",
+            min_value=r_min,
+            max_value=r_max,
+            value=int(st.session_state.get("critical_threshold", round((r_max - r_min) * 0.3 + r_min))),
             step=1,
-            key="custom_threshold_slider"
+            key="custom_threshold_slider",
+            help="Reviews with Rating ≤ this threshold will be categorized as critical."
         )
+        rat_col_vals = pd.to_numeric(df_mapped["Rating"], errors="coerce")
+        crit_count_preview = int((rat_col_vals <= custom_threshold).sum())
+        st.markdown(f"**Critical reviews:** {crit_count_preview:,}")
+
         if st.button("Confirm Threshold & Continue", key="confirm_threshold"):
             st.session_state["critical_threshold"] = custom_threshold
+            st.rerun()
         elif "critical_threshold" not in st.session_state:
             st.info("Please confirm the critical threshold to continue analysis.")
             return None, None, "Awaiting threshold confirmation."
@@ -382,10 +389,30 @@ _is_official = dataset_info.get("is_official", False)
 st.sidebar.markdown("---")
 if _is_official:
     st.sidebar.success("🟢 Imarticus Dataset")
+    _threshold = 2
+    crit_count = len(filter_critical_reviews(df_cleaned, threshold=_threshold))
+    st.sidebar.caption(f"**Rating Scale:** `1–5`")
+    st.sidebar.caption(f"**Critical threshold:** Rating ≤ {_threshold}")
+    st.sidebar.caption(f"**Critical reviews:** {crit_count:,}")
 else:
     st.sidebar.info("🔵 Compatible Dataset")
+    det = dataset_info.get("detection")
+    r_min = int(det.rating_min) if det and det.rating_min is not None else int(df_cleaned["Rating"].min())
+    r_max = int(det.rating_max) if det and det.rating_max is not None else int(df_cleaned["Rating"].max())
+    st.sidebar.markdown(f"**Rating Scale:** `{r_min}–{r_max}`")
+    _threshold = st.sidebar.slider(
+        "Critical Rating Threshold",
+        min_value=r_min,
+        max_value=r_max,
+        value=int(st.session_state.get("critical_threshold", _threshold)),
+        step=1,
+        key="sidebar_threshold_slider",
+        help="Adjust critical review threshold for this dataset."
+    )
+    st.session_state["critical_threshold"] = _threshold
+    crit_count = len(filter_critical_reviews(df_cleaned, threshold=_threshold))
+    st.sidebar.markdown(f"**Critical reviews:** {crit_count:,}")
 
-st.sidebar.caption(f"**Critical threshold:** Rating ≤ {_threshold}")
 st.sidebar.caption(f"**Rows:** {overview.cleaned_rows:,} cleaned / {overview.total_raw_rows:,} raw")
 
 # Navigation pages

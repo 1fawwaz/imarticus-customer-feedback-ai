@@ -265,6 +265,18 @@ def test_critical_threshold_non_standard_scale_flagged():
     assert is_default is False
 
 
+def test_critical_threshold_2_to_5_scale_flagged():
+    """Rating scale 2–5 → is_default False (user confirmation needed)."""
+    df = pd.DataFrame({
+        "Review Text": ["Bad", "Okay", "Good", "Great"],
+        "Rating": [2, 3, 4, 5],
+    })
+    result = detect_schema(df)
+    assert result.compatible is True
+    threshold, is_default = get_critical_threshold(result)
+    assert is_default is False
+
+
 # ===========================================================================
 # filter_critical_reviews with threshold
 # ===========================================================================
@@ -337,3 +349,67 @@ def test_select_top_with_non_one_minimum():
     top_3 = select_top_critical_reviews(df, n=3)
     assert top_3.count == 3
     assert all(r.rating == 2 for r in top_3.reviews)
+
+
+def test_custom_dataset_pipeline_with_2_to_5_ratings():
+    """End-to-end test on custom dataset containing:
+    review_content, rating, review_title, category, product_id
+    with ratings [2, 3, 4, 5].
+    Verifies:
+    - schema detection works
+    - mapping works
+    - threshold filtering works with threshold=2 and threshold=3
+    - data cleaning and overview work without TypeError
+    """
+    from src.cleaning import clean_dataset
+    from src.analysis import get_dataset_overview, filter_critical_reviews
+
+    custom_df = pd.DataFrame({
+        "review_content": [
+            "Terrible fabric, ripped after one wear.",
+            "Average item, runs a bit small.",
+            "Good quality overall.",
+            "Absolutely loved it, fits perfectly!"
+        ],
+        "rating": [2, 3, 4, 5],
+        "review_title": ["Awful", "Okay", "Nice", "Love"],
+        "category": ["Dresses", "Tops", "Bottoms", "Dresses"],
+        "product_id": [101, 102, 103, 104],
+    })
+
+    # 1. Schema detection
+    detection = detect_schema(custom_df)
+    assert detection.compatible is True
+    assert detection.review_text_col == "review_content"
+    assert detection.rating_col == "rating"
+    assert detection.rating_min == 2
+    assert detection.rating_max == 5
+
+    # 2. Mapping
+    mapped_df = apply_mapping(custom_df, detection)
+    assert "Review Text" in mapped_df.columns
+    assert "Rating" in mapped_df.columns
+    assert "Title" in mapped_df.columns  # mapped from review_title
+    assert "Department Name" in mapped_df.columns  # mapped from category
+    assert "Clothing ID" in mapped_df.columns  # mapped from product_id
+
+    # 3. Cleaning
+    clean_df, metrics = clean_dataset(mapped_df)
+    assert len(clean_df) == 4
+
+    # 4. Threshold filtering
+    crit_2 = filter_critical_reviews(clean_df, threshold=2)
+    assert len(crit_2) == 1
+    assert crit_2.iloc[0]["Rating"] == 2
+
+    crit_3 = filter_critical_reviews(clean_df, threshold=3)
+    assert len(crit_3) == 2
+    assert set(crit_3["Rating"].tolist()) == {2, 3}
+
+    # 5. Dataset overview with custom threshold
+    overview_2 = get_dataset_overview(mapped_df, clean_df, threshold=2)
+    assert overview_2.critical_reviews_count == 1
+
+    overview_3 = get_dataset_overview(mapped_df, clean_df, threshold=3)
+    assert overview_3.critical_reviews_count == 2
+
