@@ -1,0 +1,43 @@
+# ─── Secrets & Credentials ────────────────────────────────
+.env
+.streamlit/secrets.toml
+
+# ─── Python virtual environments ──────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ─── Python cache & build artefacts ───────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ─── Jupyter ──────────────────────────────────────────────
+.ipynb_checkpoints/
+Untitled*.ipynb
+
+# ─── Testing ──────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ─── Large data files (download from Kaggle) ──────────────
+data/
+outputs/
+
+# ─── OS artefacts ─────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ─── IDE artefacts ────────────────────────────────────────
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
