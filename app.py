@@ -259,18 +259,16 @@ def load_raw_csv(file_source) -> tuple[pd.DataFrame | None, str | None]:
 
 
 @st.cache_data(show_spinner=False)
-def process_mapped_data(df_mapped_json: str) -> tuple:
-    """Run cleaning pipeline on a JSON-serialised mapped DataFrame."""
-    df_mapped = pd.read_json(df_mapped_json, orient="split")
+def process_mapped_data(df_mapped: pd.DataFrame) -> tuple:
+    """Run cleaning pipeline on a mapped DataFrame."""
     df_cleaned, metrics = clean_dataset(df_mapped)
     overview = get_dataset_overview(df_mapped, df_cleaned)
     return df_cleaned, overview, metrics
 
 
 @st.cache_data(show_spinner=False)
-def compute_insights(df_critical_json: str):
+def compute_insights(df_critical: pd.DataFrame):
     """Compute top keywords, bigrams, and complaint counts dynamically."""
-    df_critical = pd.read_json(df_critical_json, orient="split")
     return get_keyword_insights(df_critical)
 
 
@@ -371,8 +369,7 @@ else:
 
 # ─── Clean & process ─────────────────────────────────────────────────────────
 try:
-    df_mapped_json = df_mapped.to_json(orient="split", date_format="iso")
-    df_cleaned, overview, cleaning_metrics = process_mapped_data(df_mapped_json)
+    df_cleaned, overview, cleaning_metrics = process_mapped_data(df_mapped)
 except Exception as exc:
     st.error(f"Data processing failed: {exc}")
     st.stop()
@@ -590,8 +587,8 @@ elif page == "📊 Complaint Intelligence":
         st.warning(f"No critical reviews found (Rating ≤ {_threshold}). Try adjusting the threshold.")
         st.stop()
 
-    # Serialize for caching
-    insights = compute_insights(critical_df.to_json(orient="split"))
+    # Compute insights
+    insights = compute_insights(critical_df)
 
     tab_terms, tab_keywords, tab_bigrams, tab_insights = st.tabs([
         "Predefined Complaint Terms",
