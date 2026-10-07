@@ -1,15 +1,16 @@
-"""Customer Feedback Analysis — Streamlit App
+"""Customer Feedback Intelligence & AI Response System — Streamlit App
 
-This app loads the Women's Clothing E-Commerce Reviews dataset,
-runs the full analysis pipeline, and lets you generate AI apology
-email drafts for critical reviews using Google Gemini.
+This project analyzes customer reviews using Python and Pandas,
+identifies critical negative reviews using rating-based rules,
+analyzes common complaint keywords, and uses Google Gemini to generate
+personalized apology-response drafts.
 
 Dataset columns used:
-    reviewText  — customer review text
-    overall     — star rating (1–5)
+    reviewText  — customer review
+    overall     — rating (1–5)
     summary     — review title
     asin        — product ID
-    helpful     — helpful vote count
+    helpful     — helpful vote/count
 """
 
 import os
@@ -31,12 +32,12 @@ from src.validators import validate_response
 
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Customer Feedback Analysis",
+    page_title="Customer Feedback Intelligence & AI Response System",
     page_icon="🛍️",
     layout="wide",
 )
 
-# ── Light custom styling ─────────────────────────────────────────────────────
+# ── Custom styling ───────────────────────────────────────────────────────────
 st.markdown("""
 <style>
     .review-quote {
@@ -89,7 +90,7 @@ def load_and_clean(file_source):
 
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
-st.sidebar.title("🛍️ Customer Feedback")
+st.sidebar.title("🛍️ Feedback System")
 st.sidebar.markdown("---")
 
 # Data source
@@ -116,17 +117,19 @@ else:
 
 # Welcome screen if no file loaded
 if file_to_load is None:
-    st.title("🛍️ Customer Feedback Analysis & AI Response")
+    st.title("🛍️ Customer Feedback Intelligence & AI Response System")
     st.markdown("""
-    This project analyzes the Women's Clothing E-Commerce Reviews dataset to identify
-    critical customer feedback and generate AI-powered apology email drafts.
+    This project analyzes customer reviews using Python and Pandas,
+    identifies critical negative reviews using rating-based rules,
+    analyzes common complaint keywords, and uses Google Gemini to generate
+    personalized apology-response drafts.
 
     **Required dataset columns:**
-    - `reviewText` — review text
-    - `overall` — star rating (1–5)
+    - `reviewText` — customer review
+    - `overall` — rating (1–5)
     - `summary` — review title
     - `asin` — product ID
-    - `helpful` — helpful vote count
+    - `helpful` — helpful vote/count
 
     Use the sidebar to load the dataset.
     """)
@@ -150,12 +153,11 @@ st.sidebar.metric("Critical Reviews", f"{overview['critical_count']:,} ({overvie
 st.sidebar.markdown("**Critical Rule:** `overall <= 2`")
 st.sidebar.markdown("---")
 
-# Navigation
+# Navigation (6 pages)
 page = st.sidebar.radio("Go to", [
     "📊 Overview",
     "🔍 Complaint Analysis",
     "🚨 Critical Reviews",
-    "⭐ Top 3 Reviews",
     "🤖 AI Response Generator",
     "✅ Validation",
     "ℹ️ Methodology",
@@ -164,7 +166,7 @@ page = st.sidebar.radio("Go to", [
 # API key status
 has_key = bool(os.getenv("GEMINI_API_KEY") and os.getenv("GEMINI_API_KEY") != "your_key_here")
 if has_key:
-    st.sidebar.success(f"✅ Gemini API key set")
+    st.sidebar.success("✅ Gemini API key set")
 else:
     st.sidebar.warning("⚠️ No API key — fallback mode")
 
@@ -174,7 +176,12 @@ else:
 # ============================================================
 if page == "📊 Overview":
     st.title("📊 Dataset Overview")
-    st.markdown("Key numbers from the cleaned dataset.")
+    st.markdown(
+        "This project analyzes customer reviews using Python and Pandas, "
+        "identifies critical negative reviews using rating-based rules, "
+        "analyzes common complaint keywords, and uses Google Gemini to generate "
+        "personalized apology-response drafts."
+    )
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Raw Rows", f"{overview['total_raw_rows']:,}")
@@ -222,9 +229,10 @@ if page == "📊 Overview":
         - Converted `overall` to numeric, dropped invalid values
         - Dropped rows with missing `reviewText` or `overall`
         - Filled missing `summary` with empty string
-        - Kept only ratings 1–5
+        - Kept only valid ratings between 1 and 5
         - Removed exact duplicate rows
         - Created `clean_text` column (lowercase, letters only) for keyword analysis
+        - Preserved original `reviewText`
         """)
 
 
@@ -233,7 +241,7 @@ if page == "📊 Overview":
 # ============================================================
 elif page == "🔍 Complaint Analysis":
     st.title("🔍 Complaint Keyword Analysis")
-    st.markdown("What are customers complaining about in low-rated reviews?")
+    st.markdown("What are customers complaining about in low-rated reviews (`overall <= 2`)?")
 
     if critical_df.empty:
         st.warning("No critical reviews found in this dataset.")
@@ -265,7 +273,7 @@ elif page == "🔍 Complaint Analysis":
         st.markdown("**Most frequent meaningful words in critical reviews:**")
         kw_df = pd.DataFrame(insights["top_keywords"])
         fig = px.bar(kw_df, x="term", y="count", text="count",
-                     color="count", color_continuous_scale="Blues")
+                      color="count", color_continuous_scale="Blues")
         fig.update_traces(textposition="outside")
         fig.update_layout(coloraxis_showscale=False, height=420, xaxis_title="", yaxis_title="Count")
         st.plotly_chart(fig, use_container_width=True)
@@ -280,102 +288,103 @@ elif page == "🔍 Complaint Analysis":
 
 
 # ============================================================
-# PAGE 3: CRITICAL REVIEWS QUEUE
+# PAGE 3: CRITICAL REVIEWS
 # ============================================================
 elif page == "🚨 Critical Reviews":
     st.title("🚨 Critical Reviews")
-    st.markdown(f"All reviews with `overall <= 2` — **{len(critical_df):,}** total.")
+    st.markdown(f"Critical review rule: `overall <= 2` (**{len(critical_df):,}** total reviews).")
 
-    col1, col2, col3 = st.columns([1, 1, 2])
-    with col1:
-        rating_choice = st.selectbox("Filter by rating", ["All (1 & 2 ★)", "1 ★ only", "2 ★ only"])
-    with col2:
-        all_asins = ["All"] + sorted(df_clean["asin"].dropna().astype(str).unique().tolist()[:50])
-        asin_choice = st.selectbox("Filter by Product (ASIN)", all_asins)
-    with col3:
-        search = st.text_input("Search keyword", placeholder="e.g., fabric, return, size...")
+    tab_top, tab_queue = st.tabs(["⭐ Top Critical Reviews", "📋 All Critical Reviews Queue"])
 
-    subset = critical_df.copy()
-    if rating_choice == "1 ★ only":
-        subset = subset[subset["overall"] == 1]
-    elif rating_choice == "2 ★ only":
-        subset = subset[subset["overall"] == 2]
-    if asin_choice != "All":
-        subset = subset[subset["asin"].astype(str) == asin_choice]
-    if search.strip():
-        kw = search.strip().lower()
-        mask = subset["clean_text"].str.contains(kw, na=False)
-        mask = mask | subset["summary"].astype(str).str.lower().str.contains(kw, na=False)
-        subset = subset[mask]
+    with tab_top:
+        st.subheader("Top Critical Reviews")
+        st.markdown("""
+        **Selection Rule:**
+        1. Filter for `overall == 1` (1-star reviews).
+        2. Sort by review text length (longest first).
+        
+        Longer reviews provide specific complaints that give Gemini the context needed to draft a personalized response.
+        """)
 
-    st.caption(f"Showing **{len(subset):,}** reviews")
-    display_cols = ["overall", "summary", "reviewText", "asin", "helpful"]
-    st.dataframe(subset[display_cols], use_container_width=True, height=420)
+        try:
+            top3 = select_top_3_reviews(df_clean)
+        except ValueError as exc:
+            st.error(str(exc))
+            st.stop()
+
+        for i, review in enumerate(top3):
+            st.markdown(f"### #{i+1} — {review['summary'] or '(No Summary)'}")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.markdown(f"**Rating:** {'★' * review['overall']}{'☆' * (5 - review['overall'])}")
+            c2.markdown(f"**Length:** {review['review_length']} chars")
+            c3.markdown(f"**Product ID (asin):** `{review['asin']}`")
+            c4.markdown(f"**Helpful Votes:** {review['helpful']}")
+
+            st.markdown(
+                f'<div class="review-quote">"{review["reviewText"]}"</div>',
+                unsafe_allow_html=True
+            )
+
+            if review["detected_complaints"]:
+                badges = " ".join([f"`{c}`" for c in review["detected_complaints"]])
+                st.markdown(f"**Complaint keywords detected:** {badges}")
+
+            if st.button(f"Load into AI Response Generator →", key=f"load_{i}"):
+                st.session_state["ai_review_text"] = review["reviewText"]
+                st.session_state["ai_rating"] = review["overall"]
+                st.session_state["ai_summary"] = review["summary"]
+                st.session_state["ai_asin"] = review["asin"]
+                st.info("Loaded! Navigate to '🤖 AI Response Generator' in the sidebar.")
+
+            st.markdown("---")
+
+    with tab_queue:
+        st.subheader("All Critical Reviews Queue")
+        st.markdown(f"Filter and inspect all **{len(critical_df):,}** critical reviews (`overall <= 2`).")
+
+        col1, col2, col3 = st.columns([1, 1, 2])
+        with col1:
+            rating_choice = st.selectbox("Filter by rating", ["All (1 & 2 ★)", "1 ★ only", "2 ★ only"])
+        with col2:
+            all_asins = ["All"] + sorted(df_clean["asin"].dropna().astype(str).unique().tolist()[:50])
+            asin_choice = st.selectbox("Filter by Product (asin)", all_asins)
+        with col3:
+            search = st.text_input("Search keyword", placeholder="e.g., fabric, return, size...")
+
+        subset = critical_df.copy()
+        if rating_choice == "1 ★ only":
+            subset = subset[subset["overall"] == 1]
+        elif rating_choice == "2 ★ only":
+            subset = subset[subset["overall"] == 2]
+        if asin_choice != "All":
+            subset = subset[subset["asin"].astype(str) == asin_choice]
+        if search.strip():
+            kw = search.strip().lower()
+            mask = subset["clean_text"].str.contains(kw, na=False)
+            mask = mask | subset["summary"].astype(str).str.lower().str.contains(kw, na=False)
+            subset = subset[mask]
+
+        st.caption(f"Showing **{len(subset):,}** reviews")
+        display_cols = ["overall", "summary", "reviewText", "asin", "helpful"]
+        st.dataframe(subset[display_cols], use_container_width=True, height=420)
 
 
 # ============================================================
-# PAGE 4: TOP 3 REVIEWS
-# ============================================================
-elif page == "⭐ Top 3 Reviews":
-    st.title("⭐ Top 3 Most Critical Reviews")
-    min_r = int(df_clean["overall"].min()) if len(df_clean) > 0 else 1
-    st.markdown(f"""
-    **Selection Rule:**
-    Filter for `overall == {min_r}` (lowest rating in dataset),
-    then sort by review text length (longest first).
-
-    Longer reviews have more detail, which makes AI responses more specific and useful.
-    """)
-
-    try:
-        top3 = select_top_3_reviews(df_clean)
-    except ValueError as exc:
-        st.error(str(exc))
-        st.stop()
-
-    for i, review in enumerate(top3):
-        st.markdown(f"### #{i+1} — {review['summary'] or '(No Summary)'}")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.markdown(f"**Rating:** {'★' * review['overall']}{'☆' * (5 - review['overall'])}")
-        c2.markdown(f"**Length:** {review['review_length']} chars")
-        c3.markdown(f"**ASIN:** `{review['asin']}`")
-        c4.markdown(f"**Helpful:** {review['helpful']}")
-
-        st.markdown(
-            f'<div class="review-quote">"{review["reviewText"]}"</div>',
-            unsafe_allow_html=True
-        )
-
-        if review["detected_complaints"]:
-            badges = " ".join([f"`{c}`" for c in review["detected_complaints"]])
-            st.markdown(f"**Complaint keywords detected:** {badges}")
-
-        if st.button(f"Load into AI Generator →", key=f"load_{i}"):
-            st.session_state["ai_review_text"] = review["reviewText"]
-            st.session_state["ai_rating"] = review["overall"]
-            st.session_state["ai_summary"] = review["summary"]
-            st.session_state["ai_asin"] = review["asin"]
-            st.info("Loaded! Go to 🤖 AI Response Generator in the sidebar.")
-
-        st.markdown("---")
-
-
-# ============================================================
-# PAGE 5: AI RESPONSE GENERATOR
+# PAGE 4: AI RESPONSE GENERATOR
 # ============================================================
 elif page == "🤖 AI Response Generator":
-    st.title("🤖 AI Apology Response Generator")
+    st.title("🤖 AI Response Generator")
     st.markdown("""
-    Generate a personalized apology email for a critical review using Google Gemini.
+    Generate personalized apology-response drafts for critical reviews using Google Gemini.
 
-    > ⚠️ **Important:** AI drafts must be reviewed by a human before sending.
+    > ⚠️ **Human Review:** AI response drafts must always be reviewed by a team member before sending.
     """)
 
-    # Pre-fill from top 3 if available
+    # Pre-fill options from top critical reviews
     try:
         top3 = select_top_3_reviews(df_clean)
         presets = {
-            f"Case {i+1}: {r['summary'][:40] or 'Review'} (ASIN: {r['asin']})": r
+            f"Case {i+1}: {r['summary'][:40] or 'Review'} (asin: {r['asin']})": r
             for i, r in enumerate(top3)
         }
     except Exception:
@@ -386,7 +395,6 @@ elif page == "🤖 AI Response Generator":
         ["(Enter manually below)"] + list(presets.keys())
     )
 
-    # Determine initial values
     if preset_choice != "(Enter manually below)" and preset_choice in presets:
         chosen = presets[preset_choice]
         default_text = chosen["reviewText"]
@@ -402,15 +410,15 @@ elif page == "🤖 AI Response Generator":
     col_text, col_meta = st.columns([3, 1])
     with col_text:
         review_input = st.text_area(
-            "Customer Review Text *",
+            "Customer Review Text (reviewText) *",
             value=default_text,
             height=150,
             placeholder="Paste the customer review text here..."
         )
     with col_meta:
-        rating_input = st.number_input("Rating (1–5)", min_value=1, max_value=5, value=int(default_rating))
-        summary_input = st.text_input("Review Title/Summary", value=default_summary)
-        asin_input = st.text_input("Product ASIN", value=default_asin)
+        rating_input = st.number_input("Rating (overall: 1–5)", min_value=1, max_value=5, value=int(default_rating))
+        summary_input = st.text_input("Review Title (summary)", value=default_summary)
+        asin_input = st.text_input("Product ID (asin)", value=default_asin)
 
     if st.button("🚀 Generate AI Apology Email", type="primary", use_container_width=True):
         if not review_input.strip():
@@ -433,7 +441,7 @@ elif page == "🤖 AI Response Generator":
         st.subheader("Generated Draft")
 
         if draft["is_fallback"]:
-            st.warning("⚠️ Fallback template used — Gemini API returned an error or key not set.")
+            st.warning("⚠️ Fallback template used — Gemini API returned an error or API key is not configured.")
             if draft["error"]:
                 with st.expander("Error details"):
                     st.code(draft["error"])
@@ -443,7 +451,7 @@ elif page == "🤖 AI Response Generator":
 
         # Validation badges
         v = draft["validation"]
-        st.subheader("Quality Checks")
+        st.subheader("Quality Validation Checks")
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             badge = "badge-pass" if v["word_limit_ok"] else "badge-fail"
@@ -466,7 +474,7 @@ elif page == "🤖 AI Response Generator":
         b1, b2 = st.columns(2)
         with b1:
             if st.button("✅ Approve Draft", use_container_width=True):
-                st.success("Draft approved! A human can now send this email.")
+                st.success("Draft approved! Ready for human dispatch.")
         with b2:
             if st.button("🔄 Regenerate", use_container_width=True):
                 del st.session_state["draft"]
@@ -474,17 +482,17 @@ elif page == "🤖 AI Response Generator":
 
 
 # ============================================================
-# PAGE 6: VALIDATION
+# PAGE 5: VALIDATION
 # ============================================================
 elif page == "✅ Validation":
-    st.title("✅ Email Response Validator")
+    st.title("✅ Response Validation")
     st.markdown("""
-    Paste any AI-drafted apology email and check whether it meets the required criteria:
-    - Word count ≤ 130
-    - Includes 'Customer Care Team' sign-off
-    - Offers a concrete next step (refund, return, or exchange)
-    - Does NOT claim an action has already been taken
-    - References the customer's specific complaint
+    Test any apology email against the defined quality and safety rules:
+    - **Word count ≤ 130**
+    - **Customer Care Team** sign-off
+    - **Concrete next step** offered (refund, return, or exchange)
+    - **No fabricated actions** (no claiming actions have already been completed, no fake order numbers)
+    - **Personalized** (references specific words from customer complaint)
     """)
 
     sample_email = (
@@ -504,7 +512,7 @@ elif page == "✅ Validation":
         result = validate_response(email_input, review_input, rating_input)
 
         if result["passed_all"]:
-            st.success("🎉 All checks passed! This email is ready for human review.")
+            st.success("🎉 All checks passed! This email meets all quality guidelines.")
         else:
             st.error("⚠️ One or more checks failed. Review the details below.")
 
@@ -528,74 +536,73 @@ elif page == "✅ Validation":
 
 
 # ============================================================
-# PAGE 7: METHODOLOGY
+# PAGE 6: METHODOLOGY
 # ============================================================
 elif page == "ℹ️ Methodology":
     st.title("ℹ️ Project Methodology")
     st.markdown("""
-    ## Customer Feedback Analysis & AI Response System
+    ## Customer Feedback Intelligence & AI Response System
 
-    This project was built as part of the Imarticus Data Science Internship Assessment.
-
-    ---
-
-    ### Dataset
-
-    Women's Clothing E-Commerce Reviews from Kaggle.
-    The app uses 5 columns from this dataset:
-
-    | Column | Description |
-    |--------|-------------|
-    | `reviewText` | The customer's full review |
-    | `overall` | Star rating (1–5) |
-    | `summary` | Short review title |
-    | `asin` | Product ID |
-    | `helpful` | Number of helpful votes |
+    This project analyzes customer reviews using Python and Pandas,
+    identifies critical negative reviews using rating-based rules,
+    analyzes common complaint keywords, and uses Google Gemini to generate
+    personalized apology-response drafts.
 
     ---
 
-    ### Step-by-Step Pipeline
+    ### Dataset Columns
 
-    **1. Data Cleaning (Pandas)**
-    - Convert rating to numeric, drop rows with missing text or rating
-    - Remove duplicates
-    - Create a `clean_text` column for keyword analysis
+    | Column | Meaning | Description |
+    |--------|---------|-------------|
+    | `reviewText` | Customer review | The full text of the customer's review |
+    | `overall` | Rating | Star rating given by the customer (1 to 5) |
+    | `summary` | Review title | Short headline summarizing the review |
+    | `asin` | Product ID | Unique product identifier |
+    | `helpful` | Helpful vote/count | Number of customers who found the review helpful |
 
-    **2. Critical Review Filtering (Rule-Based)**
-    - A review is "critical" if `overall <= 2`
-    - This is a hard rule, no ML model involved
+    ---
 
-    **3. Complaint Analysis (collections.Counter)**
-    - Count predefined complaint terms: *fit, fabric, color, size, see-through, etc.*
-    - Find the most frequent words (after removing stopwords)
-    - Extract common 2-word phrases (bigrams)
+    ### Project Workflow
 
-    **4. Top 3 Review Selection**
-    - Filter for the lowest-rated reviews (usually 1-star)
-    - Pick the 3 longest ones — more detail = better AI responses
+    ```
+    CSV
+     ↓
+    Pandas Cleaning
+     ↓
+    Critical Reviews (overall <= 2)
+     ↓
+    Complaint Keyword Analysis
+     ↓
+    Top Critical Reviews (overall == 1, longest reviewText)
+     ↓
+    Gemini AI Response
+     ↓
+    Validation
+     ↓
+    Human Review
+    ```
 
-    **5. AI Response Generation (Google Gemini)**
-    - Send each review to Gemini with a clear prompt
-    - The email must be under 130 words, offer a next step, and sign off correctly
+    ---
 
-    **6. Validation**
-    - Automatically check the generated email against 6 quality rules
-    - Flag any false claims or missing requirements
+    ### Safety & Response Guidelines
+
+    Every generated AI response adheres to the following rules:
+    - **Under 130 words** to remain concise and respectful of customer time.
+    - **Empathetic & Personalized**: Acknowledges customer frustration and quotes/addresses their specific issues.
+    - **Concrete Next Step**: Offers a refund, return, or exchange upon reply.
+    - **Sign-off**: Signed off specifically as `Customer Care Team`.
+    - **No Fabrication**: Does not invent order numbers, refund amounts, or company policies.
+    - **No Pre-Claimed Actions**: Does not claim an action has already been processed or completed.
+    - **Human Review**: Drafts must be approved by a human team member before being sent out.
 
     ---
 
     ### Tools Used
 
-    - **Python** (Pandas, collections, re)
-    - **Streamlit** (web app)
-    - **Plotly** (charts)
-    - **Google Gemini API** (AI response generation)
-    - **python-dotenv** (API key management)
-
-    ---
-
-    ### Links
-
-    - 🔗 [GitHub Repository](https://github.com/1fawwaz/imarticus-customer-feedback-ai)
-    - 🌐 [Live App](https://1fawwaz-imarticus-customer-feedback-ai-app-bovlj8.streamlit.app/)
+    - **Python** (Pandas, collections.Counter, re)
+    - **Streamlit** (interactive web UI)
+    - **Plotly** (visualizations)
+    - **Google Gemini API** (apology email draft generation)
+    - **python-dotenv** (API configuration)
+    - **pytest** (unit testing)
     """)

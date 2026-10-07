@@ -20,16 +20,15 @@ def select_top_3_reviews(df: pd.DataFrame) -> List[dict]:
     if "overall" not in df.columns or "reviewText" not in df.columns:
         raise ValueError("DataFrame must have 'overall' and 'reviewText' columns.")
 
-    min_rating = int(df["overall"].min())
-    lowest_rated = df[df["overall"] == min_rating].copy()
+    one_star = df[df["overall"] == 1].copy()
 
-    if len(lowest_rated) < 3:
+    if len(one_star) < 3:
         raise ValueError(
-            f"Not enough {min_rating}-star reviews (found {len(lowest_rated)}, need at least 3)."
+            f"Not enough 1-star reviews (found {len(one_star)}, need at least 3)."
         )
 
-    lowest_rated["review_length"] = lowest_rated["reviewText"].astype(str).str.len()
-    top3 = lowest_rated.sort_values("review_length", ascending=False).head(3)
+    one_star["review_length"] = one_star["reviewText"].astype(str).str.len()
+    top3 = one_star.sort_values("review_length", ascending=False).head(3)
 
     results = []
     for idx, row in top3.iterrows():
@@ -43,7 +42,7 @@ def select_top_3_reviews(df: pd.DataFrame) -> List[dict]:
             "helpful": row.get("helpful", 0),
             "review_length": int(row["review_length"]),
             "detected_complaints": detect_complaints(review_text),
-            "selection_rule": f"overall == {min_rating}, sorted by review length (descending)",
+            "selection_rule": "overall == 1, sorted by review length (descending)",
         })
 
     return results
