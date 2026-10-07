@@ -217,7 +217,8 @@ imarticus_customer_feedback_project/
 ### 2. Setup Virtual Environment
 ```powershell
 # Clone or navigate to the project root
-cd imarticus_customer_feedback_project
+git clone https://github.com/1fawwaz/imarticus-customer-feedback-ai.git
+cd imarticus-customer-feedback-ai
 
 # Create virtual environment
 python -m venv .venv
